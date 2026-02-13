@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: pgrsql-x86_64-linux
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: pgrsql-aarch64-macos
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: pgrsql-x86_64-macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: pgrsql-x86_64-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}.tar.gz pgrsql
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}.zip pgrsql.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: pgrsql-*
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            pgrsql-*.tar.gz
+            pgrsql-*.zip
+
+  publish:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
