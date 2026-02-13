@@ -833,7 +833,10 @@ impl App {
         let config = self.connection_dialog.config.clone();
 
         if config.host.is_empty() || config.username.is_empty() {
-            self.set_status("Host and username are required".to_string(), StatusType::Error);
+            self.set_status(
+                "Host and username are required".to_string(),
+                StatusType::Error,
+            );
             return Ok(());
         }
 
@@ -901,14 +904,20 @@ impl App {
             let databases = match db_result {
                 Ok(dbs) => dbs,
                 Err(e) => {
-                    self.set_status(format!("Failed to load databases: {}", e), StatusType::Warning);
+                    self.set_status(
+                        format!("Failed to load databases: {}", e),
+                        StatusType::Warning,
+                    );
                     Vec::new()
                 }
             };
             let schemas = match schema_result {
                 Ok(s) => s,
                 Err(e) => {
-                    self.set_status(format!("Failed to load schemas: {}", e), StatusType::Warning);
+                    self.set_status(
+                        format!("Failed to load schemas: {}", e),
+                        StatusType::Warning,
+                    );
                     Vec::new()
                 }
             };
