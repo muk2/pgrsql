@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio_postgres::{Client, NoTls};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,8 +33,13 @@ impl ConnectionConfig {
             SslMode::Require => "require",
         };
         format!(
-            "host={} port={} dbname={} user={} password={} sslmode={}",
-            self.host, self.port, self.database, self.username, self.password, sslmode
+            "host={} port={} dbname={} user={} password={} sslmode={} connect_timeout=10",
+            quote_conn_value(&self.host),
+            self.port,
+            quote_conn_value(&self.database),
+            quote_conn_value(&self.username),
+            quote_conn_value(&self.password),
+            sslmode
         )
     }
 
@@ -79,12 +85,15 @@ impl ConnectionManager {
 
     pub async fn connect(&mut self, config: ConnectionConfig) -> Result<()> {
         let conn_string = config.connection_string();
+        let timeout = Duration::from_secs(15);
 
         let client = match config.ssl_mode {
             SslMode::Disable => {
-                let (client, connection) = tokio_postgres::connect(&conn_string, NoTls)
-                    .await
-                    .context("Failed to connect to PostgreSQL")?;
+                let (client, connection) =
+                    tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, NoTls))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
+                        .context("Failed to connect to PostgreSQL")?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
                         eprintln!("Connection error: {}", e);
@@ -97,9 +106,11 @@ impl ConnectionManager {
                     .build()
                     .context("Failed to build TLS connector")?;
                 let tls = MakeTlsConnector::new(connector);
-                let (client, connection) = tokio_postgres::connect(&conn_string, tls)
-                    .await
-                    .context("Failed to connect to PostgreSQL")?;
+                let (client, connection) =
+                    tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, tls))
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
+                        .context("Failed to connect to PostgreSQL")?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
                         eprintln!("Connection error: {}", e);
@@ -197,4 +208,11 @@ impl ConnectionManager {
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedConnections {
     connections: Vec<ConnectionConfig>,
+}
+
+/// Quote a value for use in a libpq key=value connection string.
+/// Wraps in single quotes and escapes backslashes and single quotes.
+fn quote_conn_value(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+    format!("'{}'", escaped)
 }
