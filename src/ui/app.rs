@@ -832,6 +832,11 @@ impl App {
     async fn connect(&mut self) -> Result<()> {
         let config = self.connection_dialog.config.clone();
 
+        if config.host.is_empty() || config.username.is_empty() {
+            self.set_status("Host and username are required".to_string(), StatusType::Error);
+            return Ok(());
+        }
+
         self.start_loading(format!("Connecting to {}...", config.display_string()));
 
         match self.connection.connect(config.clone()).await {
@@ -877,16 +882,36 @@ impl App {
             self.start_loading("Loading schema...".to_string());
 
             let client = self.connection.client.as_ref().unwrap();
-            let databases = get_databases(client).await.unwrap_or_default();
-            let schemas = get_schemas(client).await.unwrap_or_default();
 
-            // Get tables for all schemas
+            let db_result = get_databases(client).await;
+            let schema_result = get_schemas(client).await;
+
+            let schemas_for_tables = match &schema_result {
+                Ok(s) => s.clone(),
+                Err(_) => Vec::new(),
+            };
             let mut all_tables = Vec::new();
-            for schema in &schemas {
+            for schema in &schemas_for_tables {
                 if let Ok(tables) = get_tables(client, &schema.name).await {
                     all_tables.extend(tables);
                 }
             }
+
+            // All client usage is done above; now we can mutably borrow self
+            let databases = match db_result {
+                Ok(dbs) => dbs,
+                Err(e) => {
+                    self.set_status(format!("Failed to load databases: {}", e), StatusType::Warning);
+                    Vec::new()
+                }
+            };
+            let schemas = match schema_result {
+                Ok(s) => s,
+                Err(e) => {
+                    self.set_status(format!("Failed to load schemas: {}", e), StatusType::Warning);
+                    Vec::new()
+                }
+            };
 
             self.databases = databases;
             self.schemas = schemas;
