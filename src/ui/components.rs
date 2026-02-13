@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::db::SslMode;
-use crate::ui::{is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme};
+use crate::ui::{is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     // Create main layout
@@ -40,6 +40,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Draw status bar
     draw_status_bar(frame, app, chunks[2]);
+
+    // Draw toasts (skip when dialog/help overlay is active to avoid overlap)
+    if !app.connection_dialog.active && !app.show_help {
+        draw_toasts(frame, app);
+    }
 
     // Draw connection dialog if active
     if app.connection_dialog.active {
@@ -280,7 +285,7 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     let inner_area = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_style(focused))
-        .title(" Query Editor (Ctrl+Enter to execute) ")
+        .title(" Query Editor (F5 or Ctrl+Enter to execute) ")
         .title_style(if focused {
             Style::default().fg(theme.text_accent)
         } else {
@@ -293,7 +298,7 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border_style(focused))
-            .title(" Query Editor (Ctrl+Enter to execute) ")
+            .title(" Query Editor (F5 or Ctrl+Enter to execute) ")
             .title_style(if focused {
                 Style::default().fg(theme.text_accent)
             } else {
@@ -459,18 +464,37 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Results;
 
+    let result_index = if app.results.is_empty() {
+        0
+    } else {
+        app.current_result + 1
+    };
+    let result_total = app.results.len();
+
+    // Build title with execution time and row count
+    let title = if let Some(result) = app.results.get(app.current_result) {
+        let time_ms = result.execution_time.as_secs_f64() * 1000.0;
+        if result.error.is_some() {
+            format!(" Results ({}/{}) - ERROR ({:.2}ms) ", result_index, result_total, time_ms)
+        } else if let Some(affected) = result.affected_rows {
+            format!(
+                " Results ({}/{}) - {} rows affected ({:.2}ms) ",
+                result_index, result_total, affected, time_ms
+            )
+        } else {
+            format!(
+                " Results ({}/{}) - {} rows ({:.2}ms) ",
+                result_index, result_total, result.row_count, time_ms
+            )
+        }
+    } else {
+        format!(" Results ({}/{}) ", result_index, result_total)
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_style(focused))
-        .title(format!(
-            " Results ({}/{}) ",
-            if app.results.is_empty() {
-                0
-            } else {
-                app.current_result + 1
-            },
-            app.results.len()
-        ))
+        .title(title)
         .title_style(if focused {
             Style::default().fg(theme.text_accent)
         } else {
@@ -496,7 +520,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             draw_result_table(frame, app, result, inner);
         }
     } else {
-        let text = Paragraph::new("No results yet. Execute a query with Ctrl+Enter.")
+        let text = Paragraph::new("No results yet. Execute a query with F5 or Ctrl+Enter.")
             .style(theme.muted());
         frame.render_widget(text, inner);
     }
@@ -593,24 +617,45 @@ fn draw_result_table(
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
-    let (message, style) = if let Some((msg, status_type)) = &app.status_message {
-        let s = match status_type {
-            StatusType::Info => Style::default().fg(theme.info),
-            StatusType::Success => Style::default().fg(theme.success),
-            StatusType::Warning => Style::default().fg(theme.warning),
-            StatusType::Error => Style::default().fg(theme.error),
-        };
-        (msg.clone(), s)
+    // Left section: spinner + loading message OR connection status
+    let left_text = if app.is_loading {
+        let spinner = SPINNER_FRAMES[app.spinner_frame];
+        format!(" {} {}", spinner, app.loading_message)
+    } else if app.connection.is_connected() {
+        format!(" Connected: {}", app.connection.config.display_string())
     } else {
-        (
-            "Ready | ? for help | Ctrl+Q to quit".to_string(),
-            Style::default().fg(theme.text_muted),
-        )
+        " Disconnected".to_string()
     };
 
-    let status = Paragraph::new(format!(" {}", message))
-        .style(style.bg(theme.bg_secondary));
+    let left_style = if app.is_loading {
+        Style::default().fg(theme.info).bg(theme.bg_secondary)
+    } else if app.connection.is_connected() {
+        Style::default().fg(theme.success).bg(theme.bg_secondary)
+    } else {
+        Style::default().fg(theme.text_muted).bg(theme.bg_secondary)
+    };
 
+    // Right section: help hints
+    let right_text = "? Help | Ctrl+Q Quit ";
+
+    // Calculate padding
+    let left_len = left_text.len() as u16;
+    let right_len = right_text.len() as u16;
+    let padding = area.width.saturating_sub(left_len + right_len);
+
+    let status_line = Line::from(vec![
+        Span::styled(left_text, left_style),
+        Span::styled(
+            " ".repeat(padding as usize),
+            Style::default().bg(theme.bg_secondary),
+        ),
+        Span::styled(
+            right_text.to_string(),
+            Style::default().fg(theme.text_muted).bg(theme.bg_secondary),
+        ),
+    ]);
+
+    let status = Paragraph::new(status_line);
     frame.render_widget(status, area);
 }
 
@@ -618,10 +663,10 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let dialog = &app.connection_dialog;
 
-    // Calculate dialog size and position (wider for long hostnames)
+    // Calculate dialog size and position (taller to fit saved connections list)
     let area = frame.area();
     let dialog_width = 80.min(area.width.saturating_sub(4));
-    let dialog_height = 20.min(area.height.saturating_sub(4));
+    let dialog_height = 24.min(area.height.saturating_sub(4));
 
     let dialog_x = (area.width - dialog_width) / 2;
     let dialog_y = (area.height - dialog_height) / 2;
@@ -727,17 +772,111 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     let ssl_paragraph = Paragraph::new(ssl_text).style(ssl_style);
     frame.render_widget(ssl_paragraph, chunks[6]);
 
-    // Draw connect button hint
-    let button_text = " Enter to connect | Tab to switch fields | Esc to cancel ";
+    // Draw dynamic hint text
+    let button_text = if dialog.selected_saved.is_some() {
+        " Enter to load | Del to delete | Tab to switch fields | Esc to cancel "
+    } else {
+        " Enter to connect | Tab to switch fields | Esc to cancel "
+    };
     let button = Paragraph::new(button_text)
         .style(Style::default().fg(theme.text_muted));
     frame.render_widget(button, chunks[7]);
 
-    // Draw saved connections
+    // Draw saved connections list
     if !dialog.saved_connections.is_empty() {
-        let saved_title = Paragraph::new(" Saved connections (↑/↓ to select):")
+        let saved_area = chunks[8];
+
+        // Title line
+        let title = Paragraph::new(" Saved connections (↑/↓ to select):")
             .style(Style::default().fg(theme.text_secondary));
-        frame.render_widget(saved_title, chunks[8]);
+
+        // We need to split the saved_area into title + list
+        if saved_area.height > 1 {
+            let saved_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title
+                    Constraint::Min(0),    // List items
+                ])
+                .split(saved_area);
+
+            frame.render_widget(title, saved_chunks[0]);
+
+            let items: Vec<ListItem> = dialog
+                .saved_connections
+                .iter()
+                .enumerate()
+                .map(|(i, conn)| {
+                    let is_selected = dialog.selected_saved == Some(i);
+                    let prefix = if is_selected { " > " } else { "   " };
+                    let display = format!("{}{} ({})", prefix, conn.name, conn.display_string());
+                    let style = if is_selected {
+                        Style::default()
+                            .fg(theme.text_accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text_primary)
+                    };
+                    ListItem::new(display).style(style)
+                })
+                .collect();
+
+            let list = List::new(items);
+            frame.render_widget(list, saved_chunks[1]);
+        } else {
+            frame.render_widget(title, saved_area);
+        }
+    }
+}
+
+fn draw_toasts(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    if app.toasts.is_empty() {
+        return;
+    }
+
+    let area = frame.area();
+    let toast_width = 50.min(area.width.saturating_sub(4));
+
+    // Stack toasts upward from the bottom-right, above the status bar (1 line)
+    for (i, toast) in app.toasts.iter().rev().enumerate() {
+        let toast_y = area.height.saturating_sub(2 + i as u16); // 1 for status bar, 1 per toast
+        if toast_y < 1 {
+            break; // Don't draw above the header
+        }
+
+        let toast_x = area.width.saturating_sub(toast_width + 1);
+        let toast_area = Rect::new(toast_x, toast_y, toast_width, 1);
+
+        let icon = match toast.status_type {
+            StatusType::Success => "✓",
+            StatusType::Error => "✗",
+            StatusType::Warning => "!",
+            StatusType::Info => "ℹ",
+        };
+
+        let (fg, bg) = match toast.status_type {
+            StatusType::Success => (theme.bg_primary, theme.success),
+            StatusType::Error => (theme.bg_primary, theme.error),
+            StatusType::Warning => (theme.bg_primary, theme.warning),
+            StatusType::Info => (theme.bg_primary, theme.info),
+        };
+
+        // Fade effect: dim text when toast progress > 80%
+        let style = if toast.progress() > 0.8 {
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(fg).bg(bg)
+        };
+
+        // Truncate message to fit
+        let max_msg_len = (toast_width as usize).saturating_sub(4); // icon + spaces + padding
+        let msg: String = toast.message.chars().take(max_msg_len).collect();
+        let text = format!(" {} {} ", icon, msg);
+
+        frame.render_widget(Clear, toast_area);
+        let paragraph = Paragraph::new(text).style(style);
+        frame.render_widget(paragraph, toast_area);
     }
 }
 
@@ -765,8 +904,13 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+C         Connect dialog",
         "   ?              Toggle help",
         "",
+        " NAVIGATION",
+        "   Tab             Next pane",
+        "   Shift+Tab       Previous pane",
+        "   (Sidebar → Editor → Results → ...)",
+        "",
         " EDITOR",
-        "   Ctrl+Enter     Execute query",
+        "   F5/Ctrl+Enter  Execute query",
         "   Ctrl+L         Clear editor",
         "   Ctrl+↑/↓       Navigate history",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
@@ -781,7 +925,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         " RESULTS",
         "   Arrow keys     Navigate cells",
         "   Ctrl+C         Copy cell value",
-        "   Ctrl+[/]       Previous/Next result",
+        "   Ctrl+[/]       Prev/Next result set",
+        "   PageUp/Down    Scroll results",
         "",
     ];
 

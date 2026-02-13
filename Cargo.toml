@@ -46,6 +46,12 @@ arboard = "3"
 native-tls = "0.2"
 postgres-native-tls = "0.5"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Password prompt
+rpassword = "5"
+
 # Home directory
 dirs = "5"
 

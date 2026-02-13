@@ -53,19 +53,21 @@ cargo install pgrsql
 
 2. **Connect to your database**:
    - A connection dialog appears on startup
+   - Your last-used connection is auto-populated (just enter your password)
    - Enter your PostgreSQL connection details:
      - **Name**: A friendly name for this connection
      - **Host**: Database host (e.g., `localhost`)
      - **Port**: Database port (default: `5432`)
      - **Database**: Database name (e.g., `postgres`)
      - **Username**: Your PostgreSQL username
-     - **Password**: Your password
+     - **Password**: Your password (must be entered each session for security)
    - Press `Enter` to connect
+   - Use `Up/Down` to select saved connections, `Del` to delete them
 
 3. **Write and execute queries**:
    - Type your SQL in the editor pane
-   - Press `Ctrl+Enter` to execute
-   - Results appear in the bottom pane
+   - Press `F5` or `Ctrl+Enter` to execute
+   - Results appear in the bottom pane with row count and execution time
 
 4. **Browse your schema**:
    - Use the sidebar (left pane) to explore
@@ -103,13 +105,19 @@ cargo install pgrsql
 | `Ctrl+Q` | Quit pgrsql |
 | `Ctrl+C` | Open connection dialog |
 | `?` | Toggle help overlay |
-| `Tab` | Move focus to next pane |
-| `Shift+Tab` | Move focus to previous pane |
+
+#### Navigation
+| Key | Action |
+|-----|--------|
+| `Tab` | Next pane (Sidebar → Editor → Results → Sidebar) |
+| `Shift+Tab` | Previous pane |
+
+> **Note:** In the Editor, `Tab` inserts spaces. Use `Shift+Tab` to go back to the Sidebar, or execute a query (`F5`) to move to Results.
 
 #### Editor
 | Key | Action |
 |-----|--------|
-| `Ctrl+Enter` | Execute query |
+| `F5` or `Ctrl+Enter` | Execute query |
 | `Ctrl+L` | Clear editor |
 | `Ctrl+Up` | Previous query from history |
 | `Ctrl+Down` | Next query from history |
@@ -124,9 +132,7 @@ cargo install pgrsql
 #### Sidebar
 | Key | Action |
 |-----|--------|
-| `1` | Switch to Databases tab |
-| `2` | Switch to Tables tab |
-| `3` | Switch to History tab |
+| `1` / `2` / `3` | Switch sidebar tab (Databases / Tables / History) |
 | `Up/Down` | Navigate items |
 | `Enter` | Select/expand item |
 
@@ -135,8 +141,7 @@ cargo install pgrsql
 |-----|--------|
 | `Arrow keys` | Navigate cells |
 | `Ctrl+C` | Copy selected cell value |
-| `Ctrl+[` | Previous result set |
-| `Ctrl+]` | Next result set |
+| `Ctrl+[` / `Ctrl+]` | Previous / Next result set |
 | `PageUp/PageDown` | Scroll results |
 | `Home/End` | Jump to first/last column |
 
@@ -163,7 +168,11 @@ cargo install pgrsql
 
 ## Configuration
 
-### Connection Files
+### Connection Management
+
+- **Last-used connection**: Automatically pre-populated on startup with cursor on the password field
+- **Saved connections**: Browse with `Up/Down`, load with `Enter`, delete with `Del`
+- **Password security**: Passwords are never saved to disk; you must enter your password each session
 
 Saved connections are stored in:
 - **Linux/macOS**: `~/.config/pgrsql/connections.toml`

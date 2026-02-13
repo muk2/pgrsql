@@ -11,7 +11,7 @@ pub struct ConnectionConfig {
     pub port: u16,
     pub database: String,
     pub username: String,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub password: String,
     pub ssl_mode: SslMode,
 }
@@ -165,6 +165,26 @@ impl ConnectionManager {
         let content = toml::to_string_pretty(&saved)?;
         std::fs::write(&path, content)?;
         Ok(())
+    }
+
+    pub fn save_last_connection(name: &str) -> Result<()> {
+        let path = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("pgrsql")
+            .join("last_connection");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, name)?;
+        Ok(())
+    }
+
+    pub fn load_last_connection() -> Option<String> {
+        let path = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("pgrsql")
+            .join("last_connection");
+        std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
     }
 }
 

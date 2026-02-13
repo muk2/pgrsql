@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::{Duration, Instant};
 
 use crate::db::{
     get_databases, get_schemas, get_tables, execute_query,
@@ -8,6 +9,8 @@ use crate::db::{
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::ui::Theme;
+
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -66,8 +69,13 @@ pub struct App {
     pub result_selected_row: usize,
     pub result_selected_col: usize,
 
-    // Status
-    pub status_message: Option<(String, StatusType)>,
+    // Toasts
+    pub toasts: Vec<Toast>,
+
+    // Loading
+    pub is_loading: bool,
+    pub loading_message: String,
+    pub spinner_frame: usize,
 
     // Help
     pub show_help: bool,
@@ -79,6 +87,41 @@ pub enum StatusType {
     Success,
     Warning,
     Error,
+}
+
+#[derive(Clone)]
+pub struct Toast {
+    pub message: String,
+    pub status_type: StatusType,
+    pub created_at: Instant,
+    pub duration: Duration,
+}
+
+impl Toast {
+    pub fn new(message: String, status_type: StatusType) -> Self {
+        let duration = match status_type {
+            StatusType::Info | StatusType::Success => Duration::from_secs(3),
+            StatusType::Warning => Duration::from_secs(5),
+            StatusType::Error => Duration::from_secs(8),
+        };
+        Self {
+            message,
+            status_type,
+            created_at: Instant::now(),
+            duration,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() >= self.duration
+    }
+
+    /// Returns progress from 0.0 (just created) to 1.0 (about to expire)
+    pub fn progress(&self) -> f64 {
+        let elapsed = self.created_at.elapsed().as_secs_f64();
+        let total = self.duration.as_secs_f64();
+        (elapsed / total).min(1.0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +162,32 @@ impl App {
         let query_history = QueryHistory::load().unwrap_or_default();
         let saved_connections = ConnectionManager::load_saved_connections().unwrap_or_default();
 
+        // Try to auto-populate last used connection
+        let last_connection_name = ConnectionManager::load_last_connection();
+        let (initial_config, initial_field_index, initial_selected_saved) =
+            if let Some(ref name) = last_connection_name {
+                if let Some((idx, conn)) = saved_connections
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| &c.name == name)
+                {
+                    (conn.clone(), 5_usize, Some(idx)) // Focus on password field
+                } else {
+                    (ConnectionConfig::default(), 0_usize, None)
+                }
+            } else {
+                (ConnectionConfig::default(), 0_usize, None)
+            };
+
+        let field_cursors = [
+            initial_config.name.len(),
+            initial_config.host.len(),
+            initial_config.port.to_string().len(),
+            initial_config.database.len(),
+            initial_config.username.len(),
+            initial_config.password.len(),
+        ];
+
         Self {
             theme: Theme::dark(),
             focus: Focus::ConnectionDialog,
@@ -127,8 +196,11 @@ impl App {
             connection: ConnectionManager::new(),
             connection_dialog: ConnectionDialogState {
                 active: true,
+                config: initial_config,
+                field_index: initial_field_index,
+                field_cursors,
                 saved_connections,
-                ..Default::default()
+                selected_saved: initial_selected_saved,
             },
 
             sidebar_tab: SidebarTab::Tables,
@@ -152,8 +224,37 @@ impl App {
             result_selected_row: 0,
             result_selected_col: 0,
 
-            status_message: None,
+            toasts: Vec::new(),
+            is_loading: false,
+            loading_message: String::new(),
+            spinner_frame: 0,
             show_help: false,
+        }
+    }
+
+    pub async fn try_auto_connect(&mut self, config: ConnectionConfig) {
+        // Pre-fill the connection dialog with this config
+        self.connection_dialog.config = config.clone();
+        self.connection_dialog.field_cursors = [
+            config.name.len(),
+            config.host.len(),
+            config.port.to_string().len(),
+            config.database.len(),
+            config.username.len(),
+            config.password.len(),
+        ];
+
+        // Attempt connection
+        match self.connect().await {
+            Ok(()) if self.connection.is_connected() => {
+                // Success — connect() already set focus to Editor and dismissed dialog
+            }
+            _ => {
+                // Failure — connect() already showed error toast.
+                // Ensure dialog stays visible with the config pre-filled so user can fix it.
+                self.connection_dialog.active = true;
+                self.focus = Focus::ConnectionDialog;
+            }
         }
     }
 
@@ -274,6 +375,7 @@ impl App {
                             dialog.config.username.len(),
                             dialog.config.password.len(),
                         ];
+                        dialog.field_index = 5; // Auto-focus password field
                         dialog.selected_saved = None;
                     }
                 } else {
@@ -369,35 +471,50 @@ impl App {
                 }
             }
             KeyCode::Delete => {
-                if dialog.field_index == 6 {
-                    return Ok(());
-                }
-                dialog.selected_saved = None;
-                let cursor = dialog.field_cursors[dialog.field_index];
-                let len = dialog_field_len(&dialog.config, dialog.field_index);
-                if cursor >= len {
-                    return Ok(());
-                }
-                match dialog.field_index {
-                    0 => { dialog.config.name.remove(cursor); }
-                    1 => { dialog.config.host.remove(cursor); }
-                    2 => {
-                        let mut port_str = dialog.config.port.to_string();
-                        if cursor < port_str.len() {
-                            port_str.remove(cursor);
-                            dialog.config.port = if port_str.is_empty() {
-                                0
-                            } else {
-                                port_str.parse().unwrap_or(0)
-                            };
-                            let new_len = dialog.config.port.to_string().len();
-                            dialog.field_cursors[2] = cursor.min(new_len);
+                if let Some(idx) = dialog.selected_saved {
+                    // Delete saved connection
+                    if idx < dialog.saved_connections.len() {
+                        dialog.saved_connections.remove(idx);
+                        let _ = ConnectionManager::save_connections(&dialog.saved_connections);
+                        if dialog.saved_connections.is_empty() {
+                            dialog.selected_saved = None;
+                        } else if idx >= dialog.saved_connections.len() {
+                            dialog.selected_saved = Some(dialog.saved_connections.len() - 1);
                         }
+                        self.set_status("Connection deleted".to_string(), StatusType::Info);
                     }
-                    3 => { dialog.config.database.remove(cursor); }
-                    4 => { dialog.config.username.remove(cursor); }
-                    5 => { dialog.config.password.remove(cursor); }
-                    _ => {}
+                } else {
+                    // Delete character in text field
+                    if dialog.field_index == 6 {
+                        return Ok(());
+                    }
+                    dialog.selected_saved = None;
+                    let cursor = dialog.field_cursors[dialog.field_index];
+                    let len = dialog_field_len(&dialog.config, dialog.field_index);
+                    if cursor >= len {
+                        return Ok(());
+                    }
+                    match dialog.field_index {
+                        0 => { dialog.config.name.remove(cursor); }
+                        1 => { dialog.config.host.remove(cursor); }
+                        2 => {
+                            let mut port_str = dialog.config.port.to_string();
+                            if cursor < port_str.len() {
+                                port_str.remove(cursor);
+                                dialog.config.port = if port_str.is_empty() {
+                                    0
+                                } else {
+                                    port_str.parse().unwrap_or(0)
+                                };
+                                let new_len = dialog.config.port.to_string().len();
+                                dialog.field_cursors[2] = cursor.min(new_len);
+                            }
+                        }
+                        3 => { dialog.config.database.remove(cursor); }
+                        4 => { dialog.config.username.remove(cursor); }
+                        5 => { dialog.config.password.remove(cursor); }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -466,6 +583,11 @@ impl App {
             }
             KeyCode::Enter if ctrl => {
                 // Execute query
+                self.execute_query().await?;
+                self.focus = Focus::Results;
+            }
+            KeyCode::F(5) => {
+                // F5 also executes query (works in all terminals)
                 self.execute_query().await?;
                 self.focus = Focus::Results;
             }
@@ -554,10 +676,16 @@ impl App {
 
     async fn handle_results_input(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Tab | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus = Focus::Editor;
             }
             KeyCode::BackTab => {
+                self.focus = Focus::Editor;
+            }
+            KeyCode::Tab => {
+                self.focus = Focus::Sidebar;
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus = Focus::Editor;
             }
             KeyCode::Left => {
@@ -692,18 +820,22 @@ impl App {
     async fn connect(&mut self) -> Result<()> {
         let config = self.connection_dialog.config.clone();
 
-        self.set_status(format!("Connecting to {}...", config.display_string()), StatusType::Info);
+        self.start_loading(format!("Connecting to {}...", config.display_string()));
 
         match self.connection.connect(config.clone()).await {
             Ok(()) => {
+                self.stop_loading();
                 self.connection_dialog.active = false;
                 self.focus = Focus::Editor;
 
-                // Save connection
+                // Save connection (without password)
                 if !self.connection_dialog.saved_connections.iter().any(|c| c.name == config.name) {
                     self.connection_dialog.saved_connections.push(config.clone());
                     let _ = ConnectionManager::save_connections(&self.connection_dialog.saved_connections);
                 }
+
+                // Save as last used connection
+                let _ = ConnectionManager::save_last_connection(&config.name);
 
                 self.refresh_schema().await?;
                 self.set_status(
@@ -712,6 +844,7 @@ impl App {
                 );
             }
             Err(e) => {
+                self.stop_loading();
                 self.set_status(format!("Connection failed: {}", e), StatusType::Error);
             }
         }
@@ -719,18 +852,25 @@ impl App {
     }
 
     async fn refresh_schema(&mut self) -> Result<()> {
-        if let Some(client) = &self.connection.client {
-            self.databases = get_databases(client).await.unwrap_or_default();
-            self.schemas = get_schemas(client).await.unwrap_or_default();
+        if self.connection.client.is_some() {
+            self.start_loading("Loading schema...".to_string());
+
+            let client = self.connection.client.as_ref().unwrap();
+            let databases = get_databases(&client).await.unwrap_or_default();
+            let schemas = get_schemas(&client).await.unwrap_or_default();
 
             // Get tables for all schemas
             let mut all_tables = Vec::new();
-            for schema in &self.schemas {
-                if let Ok(tables) = get_tables(client, &schema.name).await {
+            for schema in &schemas {
+                if let Ok(tables) = get_tables(&client, &schema.name).await {
                     all_tables.extend(tables);
                 }
             }
+
+            self.databases = databases;
+            self.schemas = schemas;
             self.tables = all_tables;
+            self.stop_loading();
         }
         Ok(())
     }
@@ -742,10 +882,11 @@ impl App {
         }
 
         if self.connection.client.is_some() {
-            self.set_status("Executing query...".to_string(), StatusType::Info);
+            self.start_loading("Executing query...".to_string());
 
             let client = self.connection.client.as_ref().unwrap();
             let result = execute_query(client, &query).await?;
+            self.stop_loading();
 
             // Add to history
             let entry = HistoryEntry {
@@ -807,11 +948,33 @@ impl App {
     }
 
     fn set_status(&mut self, message: String, status_type: StatusType) {
-        self.status_message = Some((message, status_type));
+        let toast = Toast::new(message, status_type);
+        self.toasts.push(toast);
+        // Keep max 5 toasts
+        if self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
+    }
+
+    fn start_loading(&mut self, message: String) {
+        self.is_loading = true;
+        self.loading_message = message;
+    }
+
+    fn stop_loading(&mut self) {
+        self.is_loading = false;
+        self.loading_message.clear();
     }
 
     pub async fn tick(&mut self) -> Result<()> {
-        // Process any async operations here
+        // Remove expired toasts
+        self.toasts.retain(|t| !t.is_expired());
+
+        // Advance spinner frame when loading
+        if self.is_loading {
+            self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        }
+
         Ok(())
     }
 }
