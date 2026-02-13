@@ -17,6 +17,7 @@ impl Default for TextBuffer {
     }
 }
 
+#[allow(dead_code)]
 impl TextBuffer {
     pub fn new() -> Self {
         Self {

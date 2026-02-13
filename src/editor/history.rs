@@ -19,6 +19,7 @@ pub struct QueryHistory {
     max_entries: usize,
 }
 
+#[allow(dead_code)]
 impl QueryHistory {
     pub fn new() -> Self {
         Self {

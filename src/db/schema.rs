@@ -2,6 +2,7 @@ use anyhow::Result;
 use tokio_postgres::Client;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DatabaseInfo {
     pub name: String,
     pub owner: String,
@@ -9,12 +10,14 @@ pub struct DatabaseInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SchemaInfo {
     pub name: String,
     pub owner: String,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TableInfo {
     pub name: String,
     pub schema: String,
@@ -30,6 +33,7 @@ pub enum TableType {
     ForeignTable,
 }
 
+#[allow(dead_code)]
 impl TableType {
     pub fn icon(&self) -> &'static str {
         match self {
@@ -51,6 +55,7 @@ impl TableType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ColumnDetails {
     pub name: String,
     pub data_type: String,
@@ -61,6 +66,7 @@ pub struct ColumnDetails {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
@@ -171,6 +177,7 @@ pub async fn get_tables(client: &Client, schema: &str) -> Result<Vec<TableInfo>>
     Ok(tables)
 }
 
+#[allow(dead_code)]
 pub async fn get_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<ColumnDetails>> {
     let rows = client
         .query(
@@ -213,6 +220,7 @@ pub async fn get_columns(client: &Client, schema: &str, table: &str) -> Result<V
     Ok(columns)
 }
 
+#[allow(dead_code)]
 pub async fn get_indexes(client: &Client, schema: &str, table: &str) -> Result<Vec<IndexInfo>> {
     let rows = client
         .query(
@@ -251,6 +259,7 @@ pub async fn get_indexes(client: &Client, schema: &str, table: &str) -> Result<V
     Ok(indexes)
 }
 
+#[allow(dead_code)]
 pub async fn get_table_ddl(client: &Client, schema: &str, table: &str) -> Result<String> {
     // Get columns
     let columns = get_columns(client, schema, table).await?;

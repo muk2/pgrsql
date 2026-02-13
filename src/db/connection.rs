@@ -66,6 +66,7 @@ pub struct ConnectionManager {
     pub current_schema: String,
 }
 
+#[allow(dead_code)]
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {

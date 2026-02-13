@@ -28,6 +28,7 @@ pub enum SidebarTab {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TreeNode {
     Database(DatabaseInfo),
     Schema(SchemaInfo),
@@ -35,6 +36,7 @@ pub enum TreeNode {
     Column(ColumnDetails),
 }
 
+#[allow(dead_code)]
 pub struct App {
     pub theme: Theme,
     pub focus: Focus,
@@ -81,6 +83,7 @@ pub struct App {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum StatusType {
     Info,
     Success,
@@ -874,13 +877,13 @@ impl App {
             self.start_loading("Loading schema...".to_string());
 
             let client = self.connection.client.as_ref().unwrap();
-            let databases = get_databases(&client).await.unwrap_or_default();
-            let schemas = get_schemas(&client).await.unwrap_or_default();
+            let databases = get_databases(client).await.unwrap_or_default();
+            let schemas = get_schemas(client).await.unwrap_or_default();
 
             // Get tables for all schemas
             let mut all_tables = Vec::new();
             for schema in &schemas {
-                if let Ok(tables) = get_tables(&client, &schema.name).await {
+                if let Ok(tables) = get_tables(client, &schema.name).await {
                     all_tables.extend(tables);
                 }
             }

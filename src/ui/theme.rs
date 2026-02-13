@@ -1,5 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
+#[allow(dead_code)]
 pub struct Theme {
     // Background colors
     pub bg_primary: Color,
@@ -42,6 +43,7 @@ impl Default for Theme {
     }
 }
 
+#[allow(dead_code)]
 impl Theme {
     pub fn dark() -> Self {
         Self {

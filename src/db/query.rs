@@ -14,6 +14,7 @@ pub struct QueryResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ColumnInfo {
     pub name: String,
     pub type_name: String,
@@ -21,6 +22,7 @@ pub struct ColumnInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CellValue {
     Null,
     Bool(bool),
@@ -70,6 +72,7 @@ impl CellValue {
     }
 }
 
+#[allow(dead_code)]
 impl QueryResult {
     pub fn empty() -> Self {
         Self {
