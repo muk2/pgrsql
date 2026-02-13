@@ -65,13 +65,13 @@ impl Theme {
             info: Color::Rgb(100, 180, 255),
 
             // Syntax highlighting
-            syntax_keyword: Color::Rgb(198, 120, 221),    // Purple
-            syntax_string: Color::Rgb(152, 195, 121),     // Green
-            syntax_number: Color::Rgb(209, 154, 102),     // Orange
-            syntax_comment: Color::Rgb(92, 99, 112),      // Gray
-            syntax_function: Color::Rgb(97, 175, 239),    // Blue
-            syntax_operator: Color::Rgb(86, 182, 194),    // Cyan
-            syntax_type: Color::Rgb(229, 192, 123),       // Yellow
+            syntax_keyword: Color::Rgb(198, 120, 221), // Purple
+            syntax_string: Color::Rgb(152, 195, 121),  // Green
+            syntax_number: Color::Rgb(209, 154, 102),  // Orange
+            syntax_comment: Color::Rgb(92, 99, 112),   // Gray
+            syntax_function: Color::Rgb(97, 175, 239), // Blue
+            syntax_operator: Color::Rgb(86, 182, 194), // Cyan
+            syntax_type: Color::Rgb(229, 192, 123),    // Yellow
 
             // UI elements
             border: Color::Rgb(60, 65, 80),
@@ -116,9 +116,7 @@ impl Theme {
 
     // Style helpers
     pub fn normal(&self) -> Style {
-        Style::default()
-            .fg(self.text_primary)
-            .bg(self.bg_primary)
+        Style::default().fg(self.text_primary).bg(self.bg_primary)
     }
 
     pub fn header(&self) -> Style {
@@ -129,9 +127,7 @@ impl Theme {
     }
 
     pub fn selected(&self) -> Style {
-        Style::default()
-            .fg(self.text_primary)
-            .bg(self.bg_selected)
+        Style::default().fg(self.text_primary).bg(self.bg_selected)
     }
 
     pub fn muted(&self) -> Style {
@@ -161,33 +157,168 @@ impl Theme {
 
 // SQL Keywords for syntax highlighting
 pub const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL",
-    "LIKE", "ILIKE", "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END",
-    "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "ON",
-    "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC", "NULLS", "FIRST", "LAST",
-    "LIMIT", "OFFSET", "FETCH", "NEXT", "ROWS", "ONLY",
-    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
-    "CREATE", "ALTER", "DROP", "TRUNCATE", "TABLE", "INDEX", "VIEW",
-    "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "CHECK", "DEFAULT",
-    "CONSTRAINT", "CASCADE", "RESTRICT", "NO", "ACTION",
-    "GRANT", "REVOKE", "ALL", "PRIVILEGES", "TO", "PUBLIC",
-    "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "SAVEPOINT",
-    "WITH", "AS", "RECURSIVE", "UNION", "INTERSECT", "EXCEPT",
-    "DISTINCT", "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF",
-    "CAST", "EXTRACT", "DATE", "TIME", "TIMESTAMP", "INTERVAL",
-    "TRUE", "FALSE", "RETURNING", "OVER", "PARTITION", "WINDOW",
-    "ROW_NUMBER", "RANK", "DENSE_RANK", "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE",
-    "SCHEMA", "DATABASE", "IF", "EXPLAIN", "ANALYZE", "VERBOSE",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "IS",
+    "NULL",
+    "LIKE",
+    "ILIKE",
+    "BETWEEN",
+    "EXISTS",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "GROUP",
+    "BY",
+    "HAVING",
+    "ORDER",
+    "ASC",
+    "DESC",
+    "NULLS",
+    "FIRST",
+    "LAST",
+    "LIMIT",
+    "OFFSET",
+    "FETCH",
+    "NEXT",
+    "ROWS",
+    "ONLY",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "TRUNCATE",
+    "TABLE",
+    "INDEX",
+    "VIEW",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "CHECK",
+    "DEFAULT",
+    "CONSTRAINT",
+    "CASCADE",
+    "RESTRICT",
+    "NO",
+    "ACTION",
+    "GRANT",
+    "REVOKE",
+    "ALL",
+    "PRIVILEGES",
+    "TO",
+    "PUBLIC",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "TRANSACTION",
+    "SAVEPOINT",
+    "WITH",
+    "AS",
+    "RECURSIVE",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "DISTINCT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "COALESCE",
+    "NULLIF",
+    "CAST",
+    "EXTRACT",
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "INTERVAL",
+    "TRUE",
+    "FALSE",
+    "RETURNING",
+    "OVER",
+    "PARTITION",
+    "WINDOW",
+    "ROW_NUMBER",
+    "RANK",
+    "DENSE_RANK",
+    "LAG",
+    "LEAD",
+    "FIRST_VALUE",
+    "LAST_VALUE",
+    "SCHEMA",
+    "DATABASE",
+    "IF",
+    "EXPLAIN",
+    "ANALYZE",
+    "VERBOSE",
 ];
 
 pub const SQL_TYPES: &[&str] = &[
-    "INTEGER", "INT", "SMALLINT", "BIGINT", "SERIAL", "BIGSERIAL",
-    "REAL", "DOUBLE", "PRECISION", "NUMERIC", "DECIMAL", "FLOAT",
-    "VARCHAR", "CHAR", "TEXT", "CHARACTER", "VARYING",
-    "BOOLEAN", "BOOL", "DATE", "TIME", "TIMESTAMP", "TIMESTAMPTZ",
-    "INTERVAL", "UUID", "JSON", "JSONB", "BYTEA", "ARRAY",
-    "POINT", "LINE", "LSEG", "BOX", "PATH", "POLYGON", "CIRCLE",
-    "CIDR", "INET", "MACADDR", "BIT", "VARBIT", "XML", "MONEY",
+    "INTEGER",
+    "INT",
+    "SMALLINT",
+    "BIGINT",
+    "SERIAL",
+    "BIGSERIAL",
+    "REAL",
+    "DOUBLE",
+    "PRECISION",
+    "NUMERIC",
+    "DECIMAL",
+    "FLOAT",
+    "VARCHAR",
+    "CHAR",
+    "TEXT",
+    "CHARACTER",
+    "VARYING",
+    "BOOLEAN",
+    "BOOL",
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "INTERVAL",
+    "UUID",
+    "JSON",
+    "JSONB",
+    "BYTEA",
+    "ARRAY",
+    "POINT",
+    "LINE",
+    "LSEG",
+    "BOX",
+    "PATH",
+    "POLYGON",
+    "CIRCLE",
+    "CIDR",
+    "INET",
+    "MACADDR",
+    "BIT",
+    "VARBIT",
+    "XML",
+    "MONEY",
 ];
 
 pub fn is_sql_keyword(word: &str) -> bool {

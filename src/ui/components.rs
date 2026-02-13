@@ -2,15 +2,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row,
-        Table, Tabs, Wrap,
-    },
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Tabs, Wrap},
     Frame,
 };
 
 use crate::db::SslMode;
-use crate::ui::{is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES};
+use crate::ui::{
+    is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
+};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     // Create main layout
@@ -29,10 +28,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw main content
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(app.sidebar_width),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
         .split(chunks[1]);
 
     draw_sidebar(frame, app, main_chunks[0]);
@@ -77,8 +73,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         " ".repeat(area.width.saturating_sub(connection_info.len() as u16 + 10) as usize)
     );
 
-    let header = Paragraph::new(header_text)
-        .style(theme.header());
+    let header = Paragraph::new(header_text).style(theme.header());
 
     frame.render_widget(header, area);
 }
@@ -104,7 +99,11 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let tabs = Tabs::new(tab_titles)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(theme.border_style(focused)))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(theme.border_style(focused)),
+        )
         .select(selected_tab)
         .style(Style::default().fg(theme.text_secondary))
         .highlight_style(
@@ -146,18 +145,17 @@ fn draw_databases_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.border_style(focused))
-                .title(" Databases ")
-                .title_style(if focused {
-                    Style::default().fg(theme.text_accent)
-                } else {
-                    Style::default().fg(theme.text_secondary)
-                }),
-        );
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style(focused))
+            .title(" Databases ")
+            .title_style(if focused {
+                Style::default().fg(theme.text_accent)
+            } else {
+                Style::default().fg(theme.text_secondary)
+            }),
+    );
 
     frame.render_widget(list, area);
 }
@@ -347,7 +345,7 @@ fn highlight_sql_line<'a>(
     let mut string_char = '"';
     let in_comment = false;
 
-    for (i, c) in line.chars().enumerate() {
+    for (i, c) in line.char_indices() {
         // Check for selection
         let is_selected = if let Some(((start_x, start_y), (end_x, end_y))) = editor.get_selection()
         {
@@ -449,7 +447,9 @@ fn highlight_sql_line<'a>(
 
 fn create_word_span<'a>(word: &str, theme: &Theme, base_style: Style) -> Span<'a> {
     let style = if is_sql_keyword(word) {
-        base_style.fg(theme.syntax_keyword).add_modifier(Modifier::BOLD)
+        base_style
+            .fg(theme.syntax_keyword)
+            .add_modifier(Modifier::BOLD)
     } else if is_sql_type(word) {
         base_style.fg(theme.syntax_type)
     } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') {
@@ -475,7 +475,10 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let title = if let Some(result) = app.results.get(app.current_result) {
         let time_ms = result.execution_time.as_secs_f64() * 1000.0;
         if result.error.is_some() {
-            format!(" Results ({}/{}) - ERROR ({:.2}ms) ", result_index, result_total, time_ms)
+            format!(
+                " Results ({}/{}) - ERROR ({:.2}ms) ",
+                result_index, result_total, time_ms
+            )
         } else if let Some(affected) = result.affected_rows {
             format!(
                 " Results ({}/{}) - {} rows affected ({:.2}ms) ",
@@ -526,12 +529,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_result_table(
-    frame: &mut Frame,
-    app: &App,
-    result: &crate::db::QueryResult,
-    area: Rect,
-) {
+fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResult, area: Rect) {
     let theme = &app.theme;
 
     // Calculate column widths
@@ -681,7 +679,11 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focused))
         .title(" Connect to PostgreSQL ")
-        .title_style(Style::default().fg(theme.text_accent).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(theme.bg_primary));
 
     let inner = block.inner(dialog_area);
@@ -706,7 +708,14 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     let label_width: u16 = 14; // " {:12} " = 1 + 12 + 1 chars
     let available_width = inner.width.saturating_sub(label_width + 1) as usize;
 
-    let field_labels = ["Name:", "Host:", "Port:", "Database:", "Username:", "Password:"];
+    let field_labels = [
+        "Name:",
+        "Host:",
+        "Port:",
+        "Database:",
+        "Username:",
+        "Password:",
+    ];
     let port_string = dialog.config.port.to_string();
     let password_display = "*".repeat(dialog.config.password.len());
     let field_values: [&str; 6] = [
@@ -767,7 +776,11 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
         SslMode::Prefer => "Prefer",
         SslMode::Require => "Require",
     };
-    let ssl_hint = if ssl_focused { " (←/→ to change)" } else { "" };
+    let ssl_hint = if ssl_focused {
+        " (←/→ to change)"
+    } else {
+        ""
+    };
     let ssl_text = format!(" {:12} {}{}", "SSL Mode:", ssl_value, ssl_hint);
     let ssl_paragraph = Paragraph::new(ssl_text).style(ssl_style);
     frame.render_widget(ssl_paragraph, chunks[6]);
@@ -778,8 +791,7 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     } else {
         " Enter to connect | Tab to switch fields | Esc to cancel "
     };
-    let button = Paragraph::new(button_text)
-        .style(Style::default().fg(theme.text_muted));
+    let button = Paragraph::new(button_text).style(Style::default().fg(theme.text_muted));
     frame.render_widget(button, chunks[7]);
 
     // Draw saved connections list
@@ -941,7 +953,11 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border_focused))
                 .title(" Help ")
-                .title_style(Style::default().fg(theme.text_accent).add_modifier(Modifier::BOLD)),
+                .title_style(
+                    Style::default()
+                        .fg(theme.text_accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
         )
         .style(Style::default().bg(theme.bg_primary));
 

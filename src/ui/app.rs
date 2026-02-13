@@ -3,9 +3,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
 
 use crate::db::{
-    get_databases, get_schemas, get_tables, execute_query,
-    ColumnDetails, ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult,
-    SchemaInfo, SslMode, TableInfo,
+    execute_query, get_databases, get_schemas, get_tables, ColumnDetails, ConnectionConfig,
+    ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::ui::Theme;
@@ -495,8 +494,12 @@ impl App {
                         return Ok(());
                     }
                     match dialog.field_index {
-                        0 => { dialog.config.name.remove(cursor); }
-                        1 => { dialog.config.host.remove(cursor); }
+                        0 => {
+                            dialog.config.name.remove(cursor);
+                        }
+                        1 => {
+                            dialog.config.host.remove(cursor);
+                        }
                         2 => {
                             let mut port_str = dialog.config.port.to_string();
                             if cursor < port_str.len() {
@@ -510,9 +513,15 @@ impl App {
                                 dialog.field_cursors[2] = cursor.min(new_len);
                             }
                         }
-                        3 => { dialog.config.database.remove(cursor); }
-                        4 => { dialog.config.username.remove(cursor); }
-                        5 => { dialog.config.password.remove(cursor); }
+                        3 => {
+                            dialog.config.database.remove(cursor);
+                        }
+                        4 => {
+                            dialog.config.username.remove(cursor);
+                        }
+                        5 => {
+                            dialog.config.password.remove(cursor);
+                        }
                         _ => {}
                     }
                 }
@@ -725,8 +734,8 @@ impl App {
             }
             KeyCode::PageDown => {
                 if let Some(result) = self.results.get(self.current_result) {
-                    self.result_selected_row = (self.result_selected_row + 20)
-                        .min(result.rows.len().saturating_sub(1));
+                    self.result_selected_row =
+                        (self.result_selected_row + 20).min(result.rows.len().saturating_sub(1));
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -829,9 +838,18 @@ impl App {
                 self.focus = Focus::Editor;
 
                 // Save connection (without password)
-                if !self.connection_dialog.saved_connections.iter().any(|c| c.name == config.name) {
-                    self.connection_dialog.saved_connections.push(config.clone());
-                    let _ = ConnectionManager::save_connections(&self.connection_dialog.saved_connections);
+                if !self
+                    .connection_dialog
+                    .saved_connections
+                    .iter()
+                    .any(|c| c.name == config.name)
+                {
+                    self.connection_dialog
+                        .saved_connections
+                        .push(config.clone());
+                    let _ = ConnectionManager::save_connections(
+                        &self.connection_dialog.saved_connections,
+                    );
                 }
 
                 // Save as last used connection

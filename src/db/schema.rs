@@ -264,7 +264,11 @@ pub async fn get_table_ddl(client: &Client, schema: &str, table: &str) -> Result
             .as_ref()
             .map(|d| format!(" DEFAULT {}", d))
             .unwrap_or_default();
-        let pk_str = if col.is_primary_key { " PRIMARY KEY" } else { "" };
+        let pk_str = if col.is_primary_key {
+            " PRIMARY KEY"
+        } else {
+            ""
+        };
 
         let comma = if i < columns.len() - 1 { "," } else { "" };
 

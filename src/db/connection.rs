@@ -38,7 +38,10 @@ impl ConnectionConfig {
     }
 
     pub fn display_string(&self) -> String {
-        format!("{}@{}:{}/{}", self.username, self.host, self.port, self.database)
+        format!(
+            "{}@{}:{}/{}",
+            self.username, self.host, self.port, self.database
+        )
     }
 }
 
@@ -184,7 +187,9 @@ impl ConnectionManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("pgrsql")
             .join("last_connection");
-        std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 }
 

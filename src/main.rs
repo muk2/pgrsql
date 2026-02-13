@@ -2,17 +2,19 @@ mod db;
 mod editor;
 mod ui;
 
+use crate::db::ConnectionManager;
+use crate::ui::App;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use crate::db::ConnectionManager;
-use crate::ui::App;
 
 /// A beautiful TUI SQL editor for PostgreSQL
 #[derive(Parser)]
@@ -34,7 +36,10 @@ async fn main() -> Result<()> {
     // Resolve auto-connect config if requested
     let auto_connect_config = if let Some(ref name) = cli.connect {
         let saved = ConnectionManager::load_saved_connections().unwrap_or_default();
-        let mut config = match saved.into_iter().find(|c| c.name.eq_ignore_ascii_case(name)) {
+        let mut config = match saved
+            .into_iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+        {
             Some(c) => c,
             None => {
                 eprintln!("Error: no saved connection named {:?}", name);
