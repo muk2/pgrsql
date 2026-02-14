@@ -83,47 +83,15 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn connect(&mut self, config: ConnectionConfig) -> Result<()> {
-        let conn_string = config.connection_string();
-        let timeout = Duration::from_secs(15);
-
-        let client = match config.ssl_mode {
-            SslMode::Disable => {
-                let (client, connection) =
-                    tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, NoTls))
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
-                        .context("Failed to connect to PostgreSQL")?;
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        eprintln!("Connection error: {}", e);
-                    }
-                });
-                client
-            }
-            SslMode::Prefer | SslMode::Require => {
-                let connector = native_tls::TlsConnector::builder()
-                    .build()
-                    .context("Failed to build TLS connector")?;
-                let tls = MakeTlsConnector::new(connector);
-                let (client, connection) =
-                    tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, tls))
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
-                        .context("Failed to connect to PostgreSQL")?;
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        eprintln!("Connection error: {}", e);
-                    }
-                });
-                client
-            }
-        };
-
+    pub fn apply_client(&mut self, config: ConnectionConfig, client: Client) {
         self.current_database = config.database.clone();
         self.config = config;
         self.client = Some(client);
+    }
 
+    pub async fn connect(&mut self, config: ConnectionConfig) -> Result<()> {
+        let client = create_client(&config).await?;
+        self.apply_client(config, client);
         Ok(())
     }
 
@@ -208,6 +176,48 @@ impl ConnectionManager {
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedConnections {
     connections: Vec<ConnectionConfig>,
+}
+
+/// Create a PostgreSQL client without needing a ConnectionManager.
+/// This is `Send` so it can be used with `tokio::spawn`.
+pub async fn create_client(config: &ConnectionConfig) -> Result<Client> {
+    let conn_string = config.connection_string();
+    let timeout = Duration::from_secs(15);
+
+    let client = match config.ssl_mode {
+        SslMode::Disable => {
+            let (client, connection) =
+                tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, NoTls))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
+                    .context("Failed to connect to PostgreSQL")?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+            client
+        }
+        SslMode::Prefer | SslMode::Require => {
+            let connector = native_tls::TlsConnector::builder()
+                .build()
+                .context("Failed to build TLS connector")?;
+            let tls = MakeTlsConnector::new(connector);
+            let (client, connection) =
+                tokio::time::timeout(timeout, tokio_postgres::connect(&conn_string, tls))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Connection timed out after 15s"))?
+                    .context("Failed to connect to PostgreSQL")?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("Connection error: {}", e);
+                }
+            });
+            client
+        }
+    };
+
+    Ok(client)
 }
 
 /// Quote a value for use in a libpq key=value connection string.

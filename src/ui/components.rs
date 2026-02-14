@@ -37,8 +37,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw status bar
     draw_status_bar(frame, app, chunks[2]);
 
-    // Draw toasts (skip when dialog/help overlay is active to avoid overlap)
-    if !app.connection_dialog.active && !app.show_help {
+    // Draw toasts
+    if !app.show_help {
         draw_toasts(frame, app);
     }
 
@@ -634,7 +634,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Right section: help hints
-    let right_text = "? Help | Ctrl+Q Quit ";
+    let right_text = "? Help | Ctrl+Q/D Quit ";
 
     // Calculate padding
     let left_len = left_text.len() as u16;
@@ -664,7 +664,7 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     // Calculate dialog size and position (taller to fit saved connections list)
     let area = frame.area();
     let dialog_width = 80.min(area.width.saturating_sub(4));
-    let dialog_height = 24.min(area.height.saturating_sub(4));
+    let dialog_height = 25.min(area.height.saturating_sub(4));
 
     let dialog_x = (area.width - dialog_width) / 2;
     let dialog_y = (area.height - dialog_height) / 2;
@@ -700,7 +700,8 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
             Constraint::Length(2), // Username
             Constraint::Length(2), // Password
             Constraint::Length(2), // SSL Mode
-            Constraint::Length(2), // Buttons
+            Constraint::Length(1), // Status message
+            Constraint::Length(1), // Buttons
             Constraint::Min(0),    // Saved connections
         ])
         .split(inner);
@@ -712,10 +713,11 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
         "Name:",
         "Host:",
         "Port:",
-        "Database:",
+        "Database:",   // optional — defaults to "postgres"
         "Username:",
         "Password:",
     ];
+    let field_placeholders: [&str; 6] = ["", "", "", "postgres", "", ""];
     let port_string = dialog.config.port.to_string();
     let password_display = "*".repeat(dialog.config.password.len());
     let field_values: [&str; 6] = [
@@ -750,8 +752,16 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
             (*value, cursor_pos)
         };
 
-        let text = format!(" {:12} {}", label, display_value);
-        let paragraph = Paragraph::new(text).style(style);
+        let (text, final_style) = if display_value.is_empty() && !field_placeholders[i].is_empty()
+        {
+            (
+                format!(" {:12} {}", label, field_placeholders[i]),
+                Style::default().fg(theme.text_muted),
+            )
+        } else {
+            (format!(" {:12} {}", label, display_value), style)
+        };
+        let paragraph = Paragraph::new(text).style(final_style);
         frame.render_widget(paragraph, chunks[i]);
 
         // Set terminal cursor for the focused field
@@ -785,18 +795,38 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     let ssl_paragraph = Paragraph::new(ssl_text).style(ssl_style);
     frame.render_widget(ssl_paragraph, chunks[6]);
 
+    // Draw inline status message
+    if let Some((ref msg, ref status_type)) = dialog.status_message {
+        let color = match status_type {
+            StatusType::Info => theme.text_accent,
+            StatusType::Success => theme.success,
+            StatusType::Warning => theme.warning,
+            StatusType::Error => theme.error,
+        };
+        let status_line = if matches!(status_type, StatusType::Info) && app.is_loading {
+            let spinner = SPINNER_FRAMES[app.spinner_frame % SPINNER_FRAMES.len()];
+            format!(" {} {}", spinner, msg)
+        } else {
+            format!(" {}", msg)
+        };
+        let status = Paragraph::new(status_line).style(Style::default().fg(color));
+        frame.render_widget(status, chunks[7]);
+    }
+
     // Draw dynamic hint text
-    let button_text = if dialog.selected_saved.is_some() {
+    let button_text = if app.pending_connection.is_some() {
+        " Esc to cancel "
+    } else if dialog.selected_saved.is_some() {
         " Enter to load | Del to delete | Tab to switch fields | Esc to cancel "
     } else {
         " Enter to connect | Tab to switch fields | Esc to cancel "
     };
     let button = Paragraph::new(button_text).style(Style::default().fg(theme.text_muted));
-    frame.render_widget(button, chunks[7]);
+    frame.render_widget(button, chunks[8]);
 
     // Draw saved connections list
     if !dialog.saved_connections.is_empty() {
-        let saved_area = chunks[8];
+        let saved_area = chunks[9];
 
         // Title line
         let title = Paragraph::new(" Saved connections (↑/↓ to select):")
@@ -912,7 +942,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         " ══════════════════════════════════════",
         "",
         " GLOBAL",
-        "   Ctrl+Q         Quit",
+        "   Ctrl+Q/D       Quit",
         "   Ctrl+C         Connect dialog",
         "   ?              Toggle help",
         "",

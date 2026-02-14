@@ -1,10 +1,12 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::{Duration, Instant};
+use tokio::task::JoinHandle;
+use tokio_postgres::Client;
 
 use crate::db::{
-    execute_query, get_databases, get_schemas, get_tables, ColumnDetails, ConnectionConfig,
-    ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
+    create_client, execute_query, get_databases, get_schemas, get_tables, ColumnDetails,
+    ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::ui::Theme;
@@ -80,6 +82,9 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Async connection task
+    pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +140,8 @@ pub struct ConnectionDialogState {
     pub field_cursors: [usize; 6],
     pub saved_connections: Vec<ConnectionConfig>,
     pub selected_saved: Option<usize>,
+    /// Inline status message shown inside the dialog
+    pub status_message: Option<(String, StatusType)>,
 }
 
 impl Default for ConnectionDialogState {
@@ -155,6 +162,7 @@ impl Default for ConnectionDialogState {
             field_cursors,
             saved_connections: Vec::new(),
             selected_saved: None,
+            status_message: None,
         }
     }
 }
@@ -203,6 +211,7 @@ impl App {
                 field_cursors,
                 saved_connections,
                 selected_saved: initial_selected_saved,
+                status_message: None,
             },
 
             sidebar_tab: SidebarTab::Tables,
@@ -231,10 +240,11 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            pending_connection: None,
         }
     }
 
-    pub async fn try_auto_connect(&mut self, config: ConnectionConfig) {
+    pub async fn try_auto_connect(&mut self, mut config: ConnectionConfig) {
         // Pre-fill the connection dialog with this config
         self.connection_dialog.config = config.clone();
         self.connection_dialog.field_cursors = [
@@ -246,14 +256,44 @@ impl App {
             config.password.len(),
         ];
 
-        // Attempt connection
-        match self.connect().await {
+        if config.database.trim().is_empty() {
+            config.database = "postgres".to_string();
+        }
+
+        // Auto-connect blocks since the UI isn't running yet
+        match self.connection.connect(config.clone()).await {
             Ok(()) if self.connection.is_connected() => {
-                // Success — connect() already set focus to Editor and dismissed dialog
+                self.connection_dialog.active = false;
+                self.focus = Focus::Editor;
+                if !self
+                    .connection_dialog
+                    .saved_connections
+                    .iter()
+                    .any(|c| c.name == config.name)
+                {
+                    self.connection_dialog
+                        .saved_connections
+                        .push(config.clone());
+                    let _ = ConnectionManager::save_connections(
+                        &self.connection_dialog.saved_connections,
+                    );
+                }
+                let _ = ConnectionManager::save_last_connection(&config.name);
+                let _ = self.refresh_schema().await;
+                self.set_status(
+                    format!("Connected to {}", config.display_string()),
+                    StatusType::Success,
+                );
             }
-            _ => {
-                // Failure — connect() already showed error toast.
-                // Ensure dialog stays visible with the config pre-filled so user can fix it.
+            Ok(()) => {
+                self.connection_dialog.active = true;
+                self.focus = Focus::ConnectionDialog;
+            }
+            Err(e) => {
+                self.connection_dialog.status_message = Some((
+                    format!("Connection failed: {}", e),
+                    StatusType::Error,
+                ));
                 self.connection_dialog.active = true;
                 self.focus = Focus::ConnectionDialog;
             }
@@ -290,13 +330,31 @@ impl App {
     }
 
     async fn handle_connection_dialog_input(&mut self, key: KeyEvent) -> Result<()> {
+        // Ignore input while connection is in progress (except Esc to cancel)
+        if self.pending_connection.is_some() && key.code != KeyCode::Esc {
+            return Ok(());
+        }
+
         let dialog = &mut self.connection_dialog;
 
         match key.code {
             KeyCode::Esc => {
+                // Cancel pending connection if any
+                if let Some((_, handle)) = self.pending_connection.take() {
+                    handle.abort();
+                    self.stop_loading();
+                    self.connection_dialog.status_message = Some((
+                        "Connection cancelled".to_string(),
+                        StatusType::Warning,
+                    ));
+                    return Ok(());
+                }
                 if self.connection.is_connected() {
                     dialog.active = false;
                     self.focus = Focus::Editor;
+                } else {
+                    // Quit when not connected
+                    self.should_quit = true;
                 }
             }
             KeyCode::Tab => {
@@ -381,7 +439,7 @@ impl App {
                         dialog.selected_saved = None;
                     }
                 } else {
-                    self.connect().await?;
+                    self.start_connect();
                 }
             }
             KeyCode::Char(c) => {
@@ -389,6 +447,7 @@ impl App {
                     return Ok(());
                 }
                 dialog.selected_saved = None;
+                dialog.status_message = None;
                 let cursor = dialog.field_cursors[dialog.field_index];
                 match dialog.field_index {
                     0 => {
@@ -829,54 +888,68 @@ impl App {
         Ok(())
     }
 
-    async fn connect(&mut self) -> Result<()> {
-        let config = self.connection_dialog.config.clone();
+    fn start_connect(&mut self) {
+        let mut config = self.connection_dialog.config.clone();
 
         if config.host.is_empty() || config.username.is_empty() {
-            self.set_status(
+            self.connection_dialog.status_message = Some((
                 "Host and username are required".to_string(),
                 StatusType::Error,
-            );
-            return Ok(());
+            ));
+            return;
         }
 
+        // Default database to "postgres" if left empty
+        if config.database.trim().is_empty() {
+            config.database = "postgres".to_string();
+            self.connection_dialog.config.database = "postgres".to_string();
+        }
+
+        // Don't start another connection if one is already in progress
+        if self.pending_connection.is_some() {
+            return;
+        }
+
+        self.connection_dialog.status_message = Some((
+            format!("Connecting to {}...", config.display_string()),
+            StatusType::Info,
+        ));
         self.start_loading(format!("Connecting to {}...", config.display_string()));
 
-        match self.connection.connect(config.clone()).await {
-            Ok(()) => {
-                self.stop_loading();
-                self.connection_dialog.active = false;
-                self.focus = Focus::Editor;
+        let config_for_task = config.clone();
+        let handle = tokio::spawn(async move { create_client(&config_for_task).await });
+        self.pending_connection = Some((config, handle));
+    }
 
-                // Save connection (without password)
-                if !self
-                    .connection_dialog
-                    .saved_connections
-                    .iter()
-                    .any(|c| c.name == config.name)
-                {
-                    self.connection_dialog
-                        .saved_connections
-                        .push(config.clone());
-                    let _ = ConnectionManager::save_connections(
-                        &self.connection_dialog.saved_connections,
-                    );
-                }
+    async fn finish_connect(&mut self, config: ConnectionConfig, client: Client) -> Result<()> {
+        self.connection.apply_client(config.clone(), client);
+        self.stop_loading();
+        self.connection_dialog.status_message = None;
+        self.connection_dialog.active = false;
+        self.focus = Focus::Editor;
 
-                // Save as last used connection
-                let _ = ConnectionManager::save_last_connection(&config.name);
-
-                self.refresh_schema().await?;
-                self.set_status(
-                    format!("Connected to {}", config.display_string()),
-                    StatusType::Success,
-                );
-            }
-            Err(e) => {
-                self.stop_loading();
-                self.set_status(format!("Connection failed: {}", e), StatusType::Error);
-            }
+        // Save connection (without password)
+        if !self
+            .connection_dialog
+            .saved_connections
+            .iter()
+            .any(|c| c.name == config.name)
+        {
+            self.connection_dialog
+                .saved_connections
+                .push(config.clone());
+            let _ =
+                ConnectionManager::save_connections(&self.connection_dialog.saved_connections);
         }
+
+        // Save as last used connection
+        let _ = ConnectionManager::save_last_connection(&config.name);
+
+        self.refresh_schema().await?;
+        self.set_status(
+            format!("Connected to {}", config.display_string()),
+            StatusType::Success,
+        );
         Ok(())
     }
 
@@ -1028,6 +1101,32 @@ impl App {
         // Advance spinner frame when loading
         if self.is_loading {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        }
+
+        // Poll pending connection task
+        if let Some((_, handle)) = &self.pending_connection {
+            if handle.is_finished() {
+                let (config, handle) = self.pending_connection.take().unwrap();
+                match handle.await {
+                    Ok(Ok(client)) => {
+                        self.finish_connect(config, client).await?;
+                    }
+                    Ok(Err(e)) => {
+                        self.stop_loading();
+                        let msg = format!("Connection failed: {}", e);
+                        self.connection_dialog.status_message =
+                            Some((msg.clone(), StatusType::Error));
+                        self.set_status(msg, StatusType::Error);
+                    }
+                    Err(e) => {
+                        self.stop_loading();
+                        let msg = format!("Connection task failed: {}", e);
+                        self.connection_dialog.status_message =
+                            Some((msg.clone(), StatusType::Error));
+                        self.set_status(msg, StatusType::Error);
+                    }
+                }
+            }
         }
 
         Ok(())
