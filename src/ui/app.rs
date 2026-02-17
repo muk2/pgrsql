@@ -290,10 +290,8 @@ impl App {
                 self.focus = Focus::ConnectionDialog;
             }
             Err(e) => {
-                self.connection_dialog.status_message = Some((
-                    format!("Connection failed: {}", e),
-                    StatusType::Error,
-                ));
+                self.connection_dialog.status_message =
+                    Some((format!("Connection failed: {}", e), StatusType::Error));
                 self.connection_dialog.active = true;
                 self.focus = Focus::ConnectionDialog;
             }
@@ -343,10 +341,8 @@ impl App {
                 if let Some((_, handle)) = self.pending_connection.take() {
                     handle.abort();
                     self.stop_loading();
-                    self.connection_dialog.status_message = Some((
-                        "Connection cancelled".to_string(),
-                        StatusType::Warning,
-                    ));
+                    self.connection_dialog.status_message =
+                        Some(("Connection cancelled".to_string(), StatusType::Warning));
                     return Ok(());
                 }
                 if self.connection.is_connected() {
@@ -389,9 +385,11 @@ impl App {
                 if dialog.field_index == 6 {
                     // Cycle SSL mode backward
                     dialog.config.ssl_mode = match dialog.config.ssl_mode {
-                        SslMode::Disable => SslMode::Require,
+                        SslMode::Disable => SslMode::VerifyFull,
                         SslMode::Prefer => SslMode::Disable,
                         SslMode::Require => SslMode::Prefer,
+                        SslMode::VerifyCa => SslMode::Require,
+                        SslMode::VerifyFull => SslMode::VerifyCa,
                     };
                 } else if dialog.field_cursors[dialog.field_index] > 0 {
                     dialog.field_cursors[dialog.field_index] -= 1;
@@ -403,7 +401,9 @@ impl App {
                     dialog.config.ssl_mode = match dialog.config.ssl_mode {
                         SslMode::Disable => SslMode::Prefer,
                         SslMode::Prefer => SslMode::Require,
-                        SslMode::Require => SslMode::Disable,
+                        SslMode::Require => SslMode::VerifyCa,
+                        SslMode::VerifyCa => SslMode::VerifyFull,
+                        SslMode::VerifyFull => SslMode::Disable,
                     };
                 } else {
                     let len = dialog_field_len(&dialog.config, dialog.field_index);
@@ -938,8 +938,7 @@ impl App {
             self.connection_dialog
                 .saved_connections
                 .push(config.clone());
-            let _ =
-                ConnectionManager::save_connections(&self.connection_dialog.saved_connections);
+            let _ = ConnectionManager::save_connections(&self.connection_dialog.saved_connections);
         }
 
         // Save as last used connection

@@ -713,7 +713,7 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
         "Name:",
         "Host:",
         "Port:",
-        "Database:",   // optional — defaults to "postgres"
+        "Database:", // optional — defaults to "postgres"
         "Username:",
         "Password:",
     ];
@@ -752,8 +752,7 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
             (*value, cursor_pos)
         };
 
-        let (text, final_style) = if display_value.is_empty() && !field_placeholders[i].is_empty()
-        {
+        let (text, final_style) = if display_value.is_empty() && !field_placeholders[i].is_empty() {
             (
                 format!(" {:12} {}", label, field_placeholders[i]),
                 Style::default().fg(theme.text_muted),
@@ -784,7 +783,9 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     let ssl_value = match dialog.config.ssl_mode {
         SslMode::Disable => "Disable",
         SslMode::Prefer => "Prefer",
-        SslMode::Require => "Require",
+        SslMode::Require => "Require (no verify)",
+        SslMode::VerifyCa => "Verify-CA",
+        SslMode::VerifyFull => "Verify-Full",
     };
     let ssl_hint = if ssl_focused {
         " (←/→ to change)"
