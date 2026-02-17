@@ -114,8 +114,10 @@ async fn run_app(
                     continue;
                 }
 
-                // Global quit
-                if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Global quit: Ctrl+Q or Ctrl+D
+                if (key.code == KeyCode::Char('q') || key.code == KeyCode::Char('d'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     return Ok(());
                 }
 
