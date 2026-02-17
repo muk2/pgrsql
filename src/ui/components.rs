@@ -267,8 +267,8 @@ fn draw_main_panel(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40), // Editor
-            Constraint::Min(0),         // Results
+            Constraint::Percentage(app.editor_height_percent), // Editor (resizable)
+            Constraint::Min(0),                                // Results
         ])
         .split(area);
 
@@ -305,6 +305,9 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         area,
     );
 
+    // Determine active query range for visual highlighting
+    let query_range = app.get_current_query_line_range();
+
     // Syntax highlight and render editor content
     let visible_height = inner_area.height as usize;
     let lines: Vec<Line> = app
@@ -316,16 +319,19 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(line_idx, line_text)| {
             let actual_line = line_idx + app.editor.scroll_offset;
-            highlight_sql_line(line_text, theme, actual_line, &app.editor)
+            let in_active_query = query_range
+                .map(|(start, end)| actual_line >= start && actual_line <= end)
+                .unwrap_or(false);
+            highlight_sql_line(line_text, theme, actual_line, &app.editor, in_active_query)
         })
         .collect();
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner_area);
 
-    // Show cursor
+    // Show cursor (offset by 2 for gutter prefix)
     if focused {
-        let cursor_x = inner_area.x + app.editor.cursor_x as u16;
+        let cursor_x = inner_area.x + 2 + app.editor.cursor_x as u16;
         let cursor_y = inner_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
         if cursor_y < inner_area.y + inner_area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -338,12 +344,26 @@ fn highlight_sql_line<'a>(
     theme: &Theme,
     line_number: usize,
     editor: &crate::editor::TextBuffer,
+    in_active_query: bool,
 ) -> Line<'a> {
     let mut spans: Vec<Span> = Vec::new();
     let mut current_word = String::new();
     let mut in_string = false;
     let mut string_char = '"';
     let in_comment = false;
+
+    // Show a gutter marker for the active query block
+    if in_active_query {
+        spans.push(Span::styled(
+            "\u{2502} ".to_string(), // "│ " vertical bar
+            Style::default().fg(theme.text_accent),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "  ".to_string(),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
 
     for (i, c) in line.char_indices() {
         // Check for selection
@@ -471,9 +491,18 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     };
     let result_total = app.results.len();
 
-    // Build title with execution time and row count
+    // Build title with execution time, row count, and cell position
     let title = if let Some(result) = app.results.get(app.current_result) {
         let time_ms = result.execution_time.as_secs_f64() * 1000.0;
+        let position = if !result.columns.is_empty() && !result.rows.is_empty() {
+            format!(
+                " [R{}/C{}]",
+                app.result_selected_row + 1,
+                app.result_selected_col + 1
+            )
+        } else {
+            String::new()
+        };
         if result.error.is_some() {
             format!(
                 " Results ({}/{}) - ERROR ({:.2}ms) ",
@@ -486,8 +515,13 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             )
         } else {
             format!(
-                " Results ({}/{}) - {} rows ({:.2}ms) ",
-                result_index, result_total, result.row_count, time_ms
+                " Results ({}/{}) - {} rows x {} cols ({:.2}ms){} ",
+                result_index,
+                result_total,
+                result.row_count,
+                result.columns.len(),
+                time_ms,
+                position
             )
         }
     } else {
@@ -953,9 +987,10 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   (Sidebar → Editor → Results → ...)",
         "",
         " EDITOR",
-        "   F5/Ctrl+Enter  Execute query",
+        "   F5/Ctrl+Enter  Execute query at cursor",
         "   Ctrl+L         Clear editor",
         "   Ctrl+↑/↓       Navigate history",
+        "   Ctrl+Shift+↑/↓ Resize editor/results",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
         "   Ctrl+A         Select all",
         "   Tab            Insert spaces",
@@ -966,7 +1001,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   ↑/↓            Navigate",
         "",
         " RESULTS",
+        "   Tab/Shift+Tab  Next/Prev column",
         "   Arrow keys     Navigate cells",
+        "   Esc            Back to editor",
         "   Ctrl+C         Copy cell value",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
