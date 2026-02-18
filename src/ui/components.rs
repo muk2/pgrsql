@@ -633,16 +633,44 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme.text_muted).bg(theme.bg_secondary)
     };
 
+    // Vim mode indicator
+    let vim_text = if app.vim_enabled {
+        match app.vim_mode {
+            crate::ui::VimMode::Normal => " -- NORMAL -- ",
+            crate::ui::VimMode::Insert => " -- INSERT -- ",
+            crate::ui::VimMode::Visual => " -- VISUAL -- ",
+            crate::ui::VimMode::VisualLine => " -- V-LINE -- ",
+        }
+    } else {
+        ""
+    };
+
+    let vim_style = if app.vim_enabled {
+        match app.vim_mode {
+            crate::ui::VimMode::Normal => Style::default()
+                .fg(theme.text_accent)
+                .bg(theme.bg_secondary),
+            crate::ui::VimMode::Insert => Style::default().fg(theme.success).bg(theme.bg_secondary),
+            crate::ui::VimMode::Visual | crate::ui::VimMode::VisualLine => {
+                Style::default().fg(theme.warning).bg(theme.bg_secondary)
+            }
+        }
+    } else {
+        Style::default().bg(theme.bg_secondary)
+    };
+
     // Right section: help hints
     let right_text = "? Help | Ctrl+Q/D Quit ";
 
     // Calculate padding
     let left_len = left_text.len() as u16;
+    let vim_len = vim_text.len() as u16;
     let right_len = right_text.len() as u16;
-    let padding = area.width.saturating_sub(left_len + right_len);
+    let padding = area.width.saturating_sub(left_len + vim_len + right_len);
 
     let status_line = Line::from(vec![
         Span::styled(left_text, left_style),
+        Span::styled(vim_text, vim_style),
         Span::styled(
             " ".repeat(padding as usize),
             Style::default().bg(theme.bg_secondary),
@@ -958,6 +986,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+↑/↓       Navigate history",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
         "   Ctrl+A         Select all",
+        "   Ctrl+Shift+V   Toggle Vim mode",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",

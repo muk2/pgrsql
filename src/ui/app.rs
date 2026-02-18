@@ -23,6 +23,14 @@ pub enum Focus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VimMode {
+    Normal,
+    Insert,
+    Visual,
+    VisualLine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SidebarTab {
     Databases,
     Tables,
@@ -82,6 +90,13 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Vim mode
+    pub vim_enabled: bool,
+    pub vim_mode: VimMode,
+    pub vim_clipboard: String,
+    pub vim_pending_op: Option<char>,
+    pub vim_count: Option<usize>,
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
@@ -240,6 +255,13 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+
+            vim_enabled: Self::load_vim_preference(),
+            vim_mode: VimMode::Normal,
+            vim_clipboard: String::new(),
+            vim_pending_op: None,
+            vim_count: None,
+
             pending_connection: None,
         }
     }
@@ -641,6 +663,53 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+        // Toggle vim mode with Ctrl+Shift+V
+        if ctrl && shift && key.code == KeyCode::Char('V') {
+            self.vim_enabled = !self.vim_enabled;
+            self.vim_mode = VimMode::Normal;
+            self.vim_pending_op = None;
+            self.vim_count = None;
+            self.editor.clear_selection();
+            Self::save_vim_preference(self.vim_enabled);
+            let mode_name = if self.vim_enabled {
+                "Vim mode enabled"
+            } else {
+                "Standard mode enabled"
+            };
+            self.set_status(mode_name.to_string(), StatusType::Info);
+            return Ok(());
+        }
+
+        // Global editor shortcuts (work in all modes)
+        match key.code {
+            KeyCode::Enter if ctrl => {
+                self.execute_query().await?;
+                self.focus = Focus::Results;
+                return Ok(());
+            }
+            KeyCode::F(5) => {
+                self.execute_query().await?;
+                self.focus = Focus::Results;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        if self.vim_enabled {
+            match self.vim_mode {
+                VimMode::Normal => self.handle_vim_normal_input(key),
+                VimMode::Insert => self.handle_vim_insert_input(key),
+                VimMode::Visual | VimMode::VisualLine => self.handle_vim_visual_input(key),
+            }
+        } else {
+            self.handle_standard_editor_input(key)
+        }
+    }
+
+    fn handle_standard_editor_input(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
         match key.code {
             KeyCode::Tab if !ctrl => {
                 if shift {
@@ -651,16 +720,6 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.focus = Focus::Sidebar;
-            }
-            KeyCode::Enter if ctrl => {
-                // Execute query
-                self.execute_query().await?;
-                self.focus = Focus::Results;
-            }
-            KeyCode::F(5) => {
-                // F5 also executes query (works in all terminals)
-                self.execute_query().await?;
-                self.focus = Focus::Results;
             }
             KeyCode::Enter => {
                 self.editor.insert_newline();
@@ -681,17 +740,14 @@ impl App {
                 // Undo (not implemented yet)
             }
             KeyCode::Char('l') if ctrl => {
-                // Clear editor
                 self.editor.clear();
             }
             KeyCode::Up if ctrl => {
-                // Previous in history
                 if let Some(entry) = self.query_history.previous() {
                     self.editor.set_text(&entry.query);
                 }
             }
             KeyCode::Down if ctrl => {
-                // Next in history
                 if let Some(entry) = self.query_history.next() {
                     self.editor.set_text(&entry.query);
                 }
@@ -743,6 +799,458 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    fn handle_vim_normal_input(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Handle count prefix (digits)
+        if let KeyCode::Char(c) = key.code {
+            if c.is_ascii_digit() && (self.vim_count.is_some() || c != '0') {
+                let current = self.vim_count.unwrap_or(0);
+                self.vim_count = Some(current * 10 + c.to_digit(10).unwrap() as usize);
+                return Ok(());
+            }
+        }
+
+        let count = self.vim_count.take().unwrap_or(1);
+
+        // Handle pending operator (d, y, c) + motion
+        if let Some(op) = self.vim_pending_op.take() {
+            match key.code {
+                KeyCode::Char(c) if c == op => {
+                    // dd, yy, cc — line operations
+                    match op {
+                        'd' => {
+                            for _ in 0..count {
+                                self.vim_delete_line();
+                            }
+                        }
+                        'y' => {
+                            self.vim_yank_line();
+                        }
+                        'c' => {
+                            self.vim_delete_line();
+                            self.editor.insert_newline();
+                            self.editor.move_up();
+                            self.vim_mode = VimMode::Insert;
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Char('w') => {
+                    self.editor.start_selection();
+                    for _ in 0..count {
+                        self.editor.move_word_right();
+                    }
+                    match op {
+                        'd' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.delete_selection();
+                        }
+                        'y' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.clear_selection();
+                        }
+                        'c' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.delete_selection();
+                            self.vim_mode = VimMode::Insert;
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Char('b') => {
+                    self.editor.start_selection();
+                    for _ in 0..count {
+                        self.editor.move_word_left();
+                    }
+                    match op {
+                        'd' | 'c' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.delete_selection();
+                            if op == 'c' {
+                                self.vim_mode = VimMode::Insert;
+                            }
+                        }
+                        'y' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.clear_selection();
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Char('$') => {
+                    self.editor.start_selection();
+                    self.editor.move_to_line_end();
+                    match op {
+                        'd' | 'c' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.delete_selection();
+                            if op == 'c' {
+                                self.vim_mode = VimMode::Insert;
+                            }
+                        }
+                        'y' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.clear_selection();
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Char('0') => {
+                    self.editor.start_selection();
+                    self.editor.move_to_line_start();
+                    match op {
+                        'd' | 'c' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.delete_selection();
+                            if op == 'c' {
+                                self.vim_mode = VimMode::Insert;
+                            }
+                        }
+                        'y' => {
+                            if let Some(text) = self.editor.get_selected_text() {
+                                self.vim_clipboard = text;
+                            }
+                            self.editor.clear_selection();
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {} // Cancel pending operator
+            }
+            return Ok(());
+        }
+
+        match key.code {
+            // Mode transitions
+            KeyCode::Char('i') => {
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('a') => {
+                self.editor.move_right();
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('I') => {
+                self.editor.move_to_line_start();
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('A') => {
+                self.editor.move_to_line_end();
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('o') => {
+                self.editor.move_to_line_end();
+                self.editor.insert_newline();
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('O') => {
+                self.editor.move_to_line_start();
+                self.editor.insert_newline();
+                self.editor.move_up();
+                self.vim_mode = VimMode::Insert;
+            }
+            KeyCode::Char('v') => {
+                self.editor.start_selection();
+                self.vim_mode = VimMode::Visual;
+            }
+            KeyCode::Char('V') => {
+                self.editor.select_line();
+                self.vim_mode = VimMode::VisualLine;
+            }
+
+            // Motions
+            KeyCode::Char('h') | KeyCode::Left => {
+                for _ in 0..count {
+                    self.editor.move_left();
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                for _ in 0..count {
+                    self.editor.move_right();
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                for _ in 0..count {
+                    self.editor.move_down();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                for _ in 0..count {
+                    self.editor.move_up();
+                }
+            }
+            KeyCode::Char('w') => {
+                for _ in 0..count {
+                    self.editor.move_word_right();
+                }
+            }
+            KeyCode::Char('b') => {
+                for _ in 0..count {
+                    self.editor.move_word_left();
+                }
+            }
+            KeyCode::Char('e') => {
+                for _ in 0..count {
+                    self.editor.move_word_right();
+                    // Move back to end of word (word_right goes past)
+                    if self.editor.cursor_x > 0 {
+                        self.editor.move_left();
+                    }
+                }
+            }
+            KeyCode::Char('0') => {
+                self.editor.move_to_line_start();
+            }
+            KeyCode::Char('$') => {
+                self.editor.move_to_line_end();
+            }
+            KeyCode::Char('^') => {
+                // Move to first non-whitespace
+                self.editor.move_to_line_start();
+                let line = self.editor.current_line().to_string();
+                for ch in line.chars() {
+                    if !ch.is_whitespace() {
+                        break;
+                    }
+                    self.editor.move_right();
+                }
+            }
+            KeyCode::Char('G') => {
+                self.editor.move_to_end();
+            }
+            KeyCode::Char('g') => {
+                // gg — go to first line (simplified: treat single g as gg)
+                self.editor.move_to_start();
+            }
+
+            // Editing
+            KeyCode::Char('x') => {
+                for _ in 0..count {
+                    self.editor.delete();
+                }
+            }
+            KeyCode::Char('r') if ctrl => {
+                // Ctrl+R: Redo (not implemented yet)
+            }
+            KeyCode::Char('u') => {
+                // Undo (not implemented yet)
+            }
+
+            // Operators
+            KeyCode::Char('d') => {
+                self.vim_pending_op = Some('d');
+            }
+            KeyCode::Char('y') => {
+                self.vim_pending_op = Some('y');
+            }
+            KeyCode::Char('c') => {
+                self.vim_pending_op = Some('c');
+            }
+
+            // Yank/Paste
+            KeyCode::Char('p') => {
+                if !self.vim_clipboard.is_empty() {
+                    let clip = self.vim_clipboard.clone();
+                    self.editor.move_right();
+                    self.editor.insert_text(&clip);
+                }
+            }
+            KeyCode::Char('P') => {
+                if !self.vim_clipboard.is_empty() {
+                    let clip = self.vim_clipboard.clone();
+                    self.editor.insert_text(&clip);
+                }
+            }
+
+            // Pane navigation
+            KeyCode::Tab => {
+                self.focus = Focus::Results;
+            }
+            KeyCode::BackTab => {
+                self.focus = Focus::Sidebar;
+            }
+
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_vim_insert_input(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.vim_mode = VimMode::Normal;
+                // Move cursor left like vim does on Esc
+                if self.editor.cursor_x > 0 {
+                    self.editor.move_left();
+                }
+            }
+            // Standard insert mode editing
+            KeyCode::Enter => {
+                self.editor.insert_newline();
+            }
+            KeyCode::Char(c) => {
+                self.editor.insert_char(c);
+            }
+            KeyCode::Backspace => {
+                self.editor.backspace();
+            }
+            KeyCode::Delete => {
+                self.editor.delete();
+            }
+            KeyCode::Tab => {
+                self.editor.insert_tab();
+            }
+            KeyCode::Left if ctrl => {
+                self.editor.move_word_left();
+            }
+            KeyCode::Right if ctrl => {
+                self.editor.move_word_right();
+            }
+            KeyCode::Left => {
+                self.editor.move_left();
+            }
+            KeyCode::Right => {
+                self.editor.move_right();
+            }
+            KeyCode::Up => {
+                self.editor.move_up();
+            }
+            KeyCode::Down => {
+                self.editor.move_down();
+            }
+            KeyCode::Home => {
+                self.editor.move_to_line_start();
+            }
+            KeyCode::End => {
+                self.editor.move_to_line_end();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_vim_visual_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.editor.clear_selection();
+                self.vim_mode = VimMode::Normal;
+            }
+            // Motions extend selection
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.editor.move_left();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.editor.move_right();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.editor.move_down();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.editor.move_up();
+            }
+            KeyCode::Char('w') => {
+                self.editor.move_word_right();
+            }
+            KeyCode::Char('b') => {
+                self.editor.move_word_left();
+            }
+            KeyCode::Char('0') => {
+                self.editor.move_to_line_start();
+            }
+            KeyCode::Char('$') => {
+                self.editor.move_to_line_end();
+            }
+            KeyCode::Char('G') => {
+                self.editor.move_to_end();
+            }
+            KeyCode::Char('g') => {
+                self.editor.move_to_start();
+            }
+            // Actions on selection
+            KeyCode::Char('d') | KeyCode::Char('x') => {
+                if let Some(text) = self.editor.get_selected_text() {
+                    self.vim_clipboard = text;
+                }
+                self.editor.delete_selection();
+                self.vim_mode = VimMode::Normal;
+            }
+            KeyCode::Char('y') => {
+                if let Some(text) = self.editor.get_selected_text() {
+                    self.vim_clipboard = text;
+                }
+                self.editor.clear_selection();
+                self.vim_mode = VimMode::Normal;
+            }
+            KeyCode::Char('c') => {
+                if let Some(text) = self.editor.get_selected_text() {
+                    self.vim_clipboard = text;
+                }
+                self.editor.delete_selection();
+                self.vim_mode = VimMode::Insert;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn vim_delete_line(&mut self) {
+        self.editor.select_line();
+        if let Some(text) = self.editor.get_selected_text() {
+            self.vim_clipboard = text;
+        }
+        self.editor.delete_selection();
+        // Delete the newline as well if we're not on the last line
+        if self.editor.cursor_y < self.editor.lines.len() - 1
+            || (self.editor.cursor_y > 0 && self.editor.cursor_x == 0)
+        {
+            self.editor.backspace();
+            self.editor.move_down();
+            self.editor.move_to_line_start();
+        }
+    }
+
+    fn vim_yank_line(&mut self) {
+        self.editor.select_line();
+        if let Some(text) = self.editor.get_selected_text() {
+            self.vim_clipboard = text;
+        }
+        self.editor.clear_selection();
+    }
+
+    fn save_vim_preference(enabled: bool) {
+        if let Some(config_dir) = dirs::config_dir() {
+            let dir = config_dir.join("pgrsql");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("vim_mode"), if enabled { "1" } else { "0" });
+        }
+    }
+
+    fn load_vim_preference() -> bool {
+        dirs::config_dir()
+            .map(|d| d.join("pgrsql").join("vim_mode"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false)
     }
 
     async fn handle_results_input(&mut self, key: KeyEvent) -> Result<()> {
