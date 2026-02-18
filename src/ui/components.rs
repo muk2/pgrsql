@@ -8,7 +8,8 @@ use ratatui::{
 
 use crate::db::SslMode;
 use crate::ui::{
-    is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
+    is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, EXPORT_FORMATS,
+    SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -45,6 +46,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw connection dialog if active
     if app.connection_dialog.active {
         draw_connection_dialog(frame, app);
+    }
+
+    // Draw export picker if active
+    if app.focus == Focus::ExportPicker {
+        draw_export_picker(frame, app);
     }
 
     // Draw help overlay if active
@@ -923,6 +929,77 @@ fn draw_toasts(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_export_picker(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let row_count = app
+        .results
+        .get(app.current_result)
+        .map(|r| r.row_count)
+        .unwrap_or(0);
+
+    let picker_width = 40.min(area.width.saturating_sub(4));
+    let picker_height = (EXPORT_FORMATS.len() as u16 + 4).min(area.height.saturating_sub(4));
+
+    let picker_x = (area.width - picker_width) / 2;
+    let picker_y = (area.height - picker_height) / 2;
+
+    let picker_area = Rect::new(picker_x, picker_y, picker_width, picker_height);
+    frame.render_widget(Clear, picker_area);
+
+    let title = format!(" Export Results ({} rows) ", row_count);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(picker_area);
+    frame.render_widget(block, picker_area);
+
+    let items: Vec<ListItem> = EXPORT_FORMATS
+        .iter()
+        .enumerate()
+        .map(|(i, fmt)| {
+            let prefix = format!("  {}. ", i + 1);
+            let style = if i == app.export_selected {
+                Style::default()
+                    .fg(theme.text_accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+            ListItem::new(format!("{}{}", prefix, fmt.label())).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    frame.render_widget(list, list_area);
+
+    // Hint text at bottom
+    let hint_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    let hint = Paragraph::new(" Enter: Export | 1-5: Quick select | Esc: Cancel")
+        .style(Style::default().fg(theme.text_muted));
+    frame.render_widget(hint, hint_area);
+}
+
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
@@ -968,6 +1045,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         " RESULTS",
         "   Arrow keys     Navigate cells",
         "   Ctrl+C         Copy cell value",
+        "   Ctrl+S         Export results",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
         "",
