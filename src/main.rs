@@ -1,3 +1,4 @@
+pub mod ast;
 mod db;
 mod editor;
 mod ui;
