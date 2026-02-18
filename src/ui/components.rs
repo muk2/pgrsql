@@ -6,6 +6,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::bookmarks::SavedQuery;
 use crate::db::SslMode;
 use crate::ui::{
     is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
@@ -50,6 +51,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw help overlay if active
     if app.show_help {
         draw_help_overlay(frame, app);
+    }
+
+    // Draw bookmark picker if active
+    if app.focus == Focus::BookmarkPicker {
+        draw_bookmark_picker(frame, app);
+    }
+
+    // Draw bookmark save dialog if active
+    if app.focus == Focus::BookmarkSave {
+        draw_bookmark_save(frame, app);
     }
 }
 
@@ -958,6 +969,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+↑/↓       Navigate history",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
         "   Ctrl+A         Select all",
+        "   Ctrl+Shift+S   Save bookmark",
+        "   Ctrl+Shift+O   Open bookmarks",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
@@ -993,4 +1006,221 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         .style(Style::default().bg(theme.bg_primary));
 
     frame.render_widget(help, help_area);
+}
+
+fn draw_bookmark_picker(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let dialog_width = 70.min(area.width.saturating_sub(4));
+    let dialog_height = 24.min(area.height.saturating_sub(4));
+
+    let dialog_x = (area.width - dialog_width) / 2;
+    let dialog_y = (area.height - dialog_height) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(" Saved Queries ")
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Search
+            Constraint::Min(0),    // List
+            Constraint::Length(3), // Preview
+            Constraint::Length(1), // Hints
+        ])
+        .split(inner);
+
+    // Search field
+    let search_text = format!(" Search: {}", app.bookmark_picker.search);
+    let search = Paragraph::new(search_text).style(Style::default().fg(theme.text_accent));
+    frame.render_widget(search, chunks[0]);
+
+    // Set cursor position in search field
+    let cursor_x = chunks[0].x + 9 + app.bookmark_picker.search_cursor as u16;
+    let cursor_y = chunks[0].y;
+    if cursor_x < chunks[0].x + chunks[0].width {
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    // Filtered bookmarks list
+    let filtered = app.filtered_bookmarks();
+    let list_height = chunks[1].height as usize;
+
+    // Calculate scroll
+    let scroll = if app.bookmark_picker.selected >= list_height {
+        app.bookmark_picker.selected - list_height + 1
+    } else {
+        0
+    };
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .skip(scroll)
+        .take(list_height)
+        .enumerate()
+        .map(|(display_idx, (_, bookmark))| {
+            let actual_idx = display_idx + scroll;
+            let is_selected = actual_idx == app.bookmark_picker.selected;
+
+            let builtin_marker = if bookmark.is_builtin {
+                " [built-in]"
+            } else {
+                ""
+            };
+            let tags_str = if bookmark.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", bookmark.tags.join(", "))
+            };
+
+            let text = format!(
+                " {} {}{}{}",
+                if is_selected { ">" } else { " " },
+                bookmark.name,
+                tags_str,
+                builtin_marker,
+            );
+
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.text_accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, chunks[1]);
+
+    // Preview of selected bookmark
+    if let Some(&(_, bookmark)) = filtered.get(app.bookmark_picker.selected) {
+        draw_bookmark_preview(frame, theme, bookmark, chunks[2]);
+    }
+
+    // Hints
+    let hints = Paragraph::new(" Enter: Load | Del: Delete | Esc: Cancel")
+        .style(Style::default().fg(theme.text_muted));
+    frame.render_widget(hints, chunks[3]);
+}
+
+fn draw_bookmark_preview(frame: &mut Frame, theme: &Theme, bookmark: &SavedQuery, area: Rect) {
+    let preview: String = bookmark
+        .query
+        .lines()
+        .take(3)
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let preview_truncated: String = preview.chars().take(area.width as usize - 4).collect();
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  {}", preview_truncated),
+        Style::default().fg(theme.text_secondary),
+    ))];
+
+    if let Some(ref desc) = bookmark.description {
+        let desc_truncated: String = desc.chars().take(area.width as usize - 4).collect();
+        lines.push(Line::from(Span::styled(
+            format!("  {}", desc_truncated),
+            Style::default().fg(theme.text_muted),
+        )));
+    }
+
+    let preview_widget = Paragraph::new(lines);
+    frame.render_widget(preview_widget, area);
+}
+
+fn draw_bookmark_save(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let dialog_width = 60.min(area.width.saturating_sub(4));
+    let dialog_height = 12.min(area.height.saturating_sub(4));
+
+    let dialog_x = (area.width - dialog_width) / 2;
+    let dialog_y = (area.height - dialog_height) / 2;
+
+    let dialog_area = Rect::new(dialog_x, dialog_y, dialog_width, dialog_height);
+    frame.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(" Save Bookmark ")
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Name
+            Constraint::Length(2), // Description
+            Constraint::Length(2), // Tags
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Hints
+        ])
+        .split(inner);
+
+    let label_width: u16 = 15;
+    let save_state = &app.bookmark_save;
+
+    let fields = [
+        ("Name:", &save_state.name, save_state.name_cursor),
+        (
+            "Description:",
+            &save_state.description,
+            save_state.description_cursor,
+        ),
+        ("Tags (csv):", &save_state.tags, save_state.tags_cursor),
+    ];
+
+    for (i, (label, value, cursor)) in fields.iter().enumerate() {
+        let is_focused = save_state.field_index == i;
+        let style = if is_focused {
+            Style::default().fg(theme.text_accent)
+        } else {
+            Style::default().fg(theme.text_primary)
+        };
+
+        let text = format!(" {:13} {}", label, value);
+        let paragraph = Paragraph::new(text).style(style);
+        frame.render_widget(paragraph, chunks[i]);
+
+        if is_focused {
+            let cursor_x = chunks[i].x + label_width + *cursor as u16;
+            let cursor_y = chunks[i].y;
+            if cursor_x < chunks[i].x + chunks[i].width {
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+        }
+    }
+
+    let hints = Paragraph::new(" Enter: Save | Tab: Next field | Esc: Cancel")
+        .style(Style::default().fg(theme.text_muted));
+    frame.render_widget(hints, chunks[4]);
 }

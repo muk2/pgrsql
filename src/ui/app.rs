@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 
+use crate::bookmarks::{built_in_snippets, load_bookmarks, save_bookmarks, SavedQuery};
 use crate::db::{
     create_client, execute_query, get_databases, get_schemas, get_tables, ColumnDetails,
     ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
@@ -20,6 +21,8 @@ pub enum Focus {
     Results,
     ConnectionDialog,
     Help,
+    BookmarkPicker,
+    BookmarkSave,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,8 +86,31 @@ pub struct App {
     // Help
     pub show_help: bool,
 
+    // Bookmarks
+    pub bookmarks: Vec<SavedQuery>,
+    pub bookmark_picker: BookmarkPickerState,
+    pub bookmark_save: BookmarkSaveState,
+
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BookmarkPickerState {
+    pub search: String,
+    pub search_cursor: usize,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BookmarkSaveState {
+    pub name: String,
+    pub name_cursor: usize,
+    pub description: String,
+    pub description_cursor: usize,
+    pub tags: String,
+    pub tags_cursor: usize,
+    pub field_index: usize, // 0=name, 1=description, 2=tags
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,6 +198,12 @@ impl App {
         let query_history = QueryHistory::load().unwrap_or_default();
         let saved_connections = ConnectionManager::load_saved_connections().unwrap_or_default();
 
+        // Load bookmarks: merge built-in snippets with user bookmarks
+        let mut bookmarks = built_in_snippets();
+        if let Ok(user_bookmarks) = load_bookmarks() {
+            bookmarks.extend(user_bookmarks);
+        }
+
         // Try to auto-populate last used connection
         let last_connection_name = ConnectionManager::load_last_connection();
         let (initial_config, initial_field_index, initial_selected_saved) =
@@ -240,6 +272,11 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+
+            bookmarks,
+            bookmark_picker: BookmarkPickerState::default(),
+            bookmark_save: BookmarkSaveState::default(),
+
             pending_connection: None,
         }
     }
@@ -324,6 +361,8 @@ impl App {
             Focus::Editor => self.handle_editor_input(key).await,
             Focus::Results => self.handle_results_input(key).await,
             Focus::Help => self.handle_help_input(key).await,
+            Focus::BookmarkPicker => self.handle_bookmark_picker_input(key).await,
+            Focus::BookmarkSave => self.handle_bookmark_save_input(key).await,
         }
     }
 
@@ -679,6 +718,21 @@ impl App {
             }
             KeyCode::Char('z') if ctrl => {
                 // Undo (not implemented yet)
+            }
+            KeyCode::Char('S') if ctrl && shift => {
+                // Save current query as bookmark
+                let text = self.editor.text();
+                if !text.trim().is_empty() {
+                    self.bookmark_save = BookmarkSaveState::default();
+                    self.focus = Focus::BookmarkSave;
+                }
+                return Ok(());
+            }
+            KeyCode::Char('O') if ctrl && shift => {
+                // Open bookmark picker
+                self.bookmark_picker = BookmarkPickerState::default();
+                self.focus = Focus::BookmarkPicker;
+                return Ok(());
             }
             KeyCode::Char('l') if ctrl => {
                 // Clear editor
@@ -1057,6 +1111,229 @@ impl App {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }
 
+        Ok(())
+    }
+
+    pub fn filtered_bookmarks(&self) -> Vec<(usize, &SavedQuery)> {
+        let search = self.bookmark_picker.search.to_lowercase();
+        self.bookmarks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                if search.is_empty() {
+                    return true;
+                }
+                b.name.to_lowercase().contains(&search)
+                    || b.query.to_lowercase().contains(&search)
+                    || b.tags.iter().any(|t| t.to_lowercase().contains(&search))
+                    || b.description
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&search)
+            })
+            .collect()
+    }
+
+    async fn handle_bookmark_picker_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.focus = Focus::Editor;
+            }
+            KeyCode::Up => {
+                if self.bookmark_picker.selected > 0 {
+                    self.bookmark_picker.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let count = self.filtered_bookmarks().len();
+                if self.bookmark_picker.selected < count.saturating_sub(1) {
+                    self.bookmark_picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let filtered = self.filtered_bookmarks();
+                if let Some(&(idx, _)) = filtered.get(self.bookmark_picker.selected) {
+                    let query = self.bookmarks[idx].query.clone();
+                    self.bookmarks[idx].last_used = Some(chrono::Utc::now());
+                    let _ = save_bookmarks(&self.bookmarks);
+                    self.editor.set_text(&query);
+                    self.focus = Focus::Editor;
+                    self.set_status("Bookmark loaded".to_string(), StatusType::Info);
+                }
+            }
+            KeyCode::Delete => {
+                let filtered = self.filtered_bookmarks();
+                if let Some(&(idx, _)) = filtered.get(self.bookmark_picker.selected) {
+                    if !self.bookmarks[idx].is_builtin {
+                        let name = self.bookmarks[idx].name.clone();
+                        self.bookmarks.remove(idx);
+                        let _ = save_bookmarks(&self.bookmarks);
+                        self.set_status(format!("Deleted bookmark: {}", name), StatusType::Info);
+                        let count = self.filtered_bookmarks().len();
+                        if self.bookmark_picker.selected >= count && count > 0 {
+                            self.bookmark_picker.selected = count - 1;
+                        }
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if self.bookmark_picker.search_cursor > 0 {
+                    self.bookmark_picker
+                        .search
+                        .remove(self.bookmark_picker.search_cursor - 1);
+                    self.bookmark_picker.search_cursor -= 1;
+                    self.bookmark_picker.selected = 0;
+                }
+            }
+            KeyCode::Char(c) => {
+                self.bookmark_picker
+                    .search
+                    .insert(self.bookmark_picker.search_cursor, c);
+                self.bookmark_picker.search_cursor += 1;
+                self.bookmark_picker.selected = 0;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_bookmark_save_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.focus = Focus::Editor;
+            }
+            KeyCode::Tab => {
+                self.bookmark_save.field_index = (self.bookmark_save.field_index + 1) % 3;
+            }
+            KeyCode::BackTab => {
+                self.bookmark_save.field_index = if self.bookmark_save.field_index == 0 {
+                    2
+                } else {
+                    self.bookmark_save.field_index - 1
+                };
+            }
+            KeyCode::Enter => {
+                let name = self.bookmark_save.name.trim().to_string();
+                if name.is_empty() {
+                    self.set_status("Bookmark name is required".to_string(), StatusType::Warning);
+                    return Ok(());
+                }
+                let query = self.editor.text();
+                let description = if self.bookmark_save.description.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.bookmark_save.description.trim().to_string())
+                };
+                let tags: Vec<String> = self
+                    .bookmark_save
+                    .tags
+                    .split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+
+                let bookmark = SavedQuery {
+                    name: name.clone(),
+                    query,
+                    description,
+                    tags,
+                    created_at: chrono::Utc::now(),
+                    last_used: None,
+                    is_builtin: false,
+                };
+                self.bookmarks.push(bookmark);
+                let _ = save_bookmarks(&self.bookmarks);
+                self.focus = Focus::Editor;
+                self.set_status(format!("Saved bookmark: {}", name), StatusType::Success);
+            }
+            KeyCode::Char(c) => match self.bookmark_save.field_index {
+                0 => {
+                    self.bookmark_save
+                        .name
+                        .insert(self.bookmark_save.name_cursor, c);
+                    self.bookmark_save.name_cursor += 1;
+                }
+                1 => {
+                    self.bookmark_save
+                        .description
+                        .insert(self.bookmark_save.description_cursor, c);
+                    self.bookmark_save.description_cursor += 1;
+                }
+                2 => {
+                    self.bookmark_save
+                        .tags
+                        .insert(self.bookmark_save.tags_cursor, c);
+                    self.bookmark_save.tags_cursor += 1;
+                }
+                _ => {}
+            },
+            KeyCode::Backspace => match self.bookmark_save.field_index {
+                0 => {
+                    if self.bookmark_save.name_cursor > 0 {
+                        self.bookmark_save
+                            .name
+                            .remove(self.bookmark_save.name_cursor - 1);
+                        self.bookmark_save.name_cursor -= 1;
+                    }
+                }
+                1 => {
+                    if self.bookmark_save.description_cursor > 0 {
+                        self.bookmark_save
+                            .description
+                            .remove(self.bookmark_save.description_cursor - 1);
+                        self.bookmark_save.description_cursor -= 1;
+                    }
+                }
+                2 => {
+                    if self.bookmark_save.tags_cursor > 0 {
+                        self.bookmark_save
+                            .tags
+                            .remove(self.bookmark_save.tags_cursor - 1);
+                        self.bookmark_save.tags_cursor -= 1;
+                    }
+                }
+                _ => {}
+            },
+            KeyCode::Left => match self.bookmark_save.field_index {
+                0 => {
+                    if self.bookmark_save.name_cursor > 0 {
+                        self.bookmark_save.name_cursor -= 1;
+                    }
+                }
+                1 => {
+                    if self.bookmark_save.description_cursor > 0 {
+                        self.bookmark_save.description_cursor -= 1;
+                    }
+                }
+                2 => {
+                    if self.bookmark_save.tags_cursor > 0 {
+                        self.bookmark_save.tags_cursor -= 1;
+                    }
+                }
+                _ => {}
+            },
+            KeyCode::Right => match self.bookmark_save.field_index {
+                0 => {
+                    if self.bookmark_save.name_cursor < self.bookmark_save.name.len() {
+                        self.bookmark_save.name_cursor += 1;
+                    }
+                }
+                1 => {
+                    if self.bookmark_save.description_cursor < self.bookmark_save.description.len()
+                    {
+                        self.bookmark_save.description_cursor += 1;
+                    }
+                }
+                2 => {
+                    if self.bookmark_save.tags_cursor < self.bookmark_save.tags.len() {
+                        self.bookmark_save.tags_cursor += 1;
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
         Ok(())
     }
 
