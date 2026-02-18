@@ -957,6 +957,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+L         Clear editor",
         "   Ctrl+↑/↓       Navigate history",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
+        "   Ctrl+Z         Undo",
+        "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Tab            Insert spaces",
         "",
