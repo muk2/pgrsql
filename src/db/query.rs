@@ -201,6 +201,99 @@ fn parse_rows(rows: &[Row], execution_time: Duration) -> QueryResult {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- CellValue display ---
+
+    #[test]
+    fn test_null_display() {
+        assert_eq!(CellValue::Null.display(), "NULL");
+    }
+
+    #[test]
+    fn test_bool_display() {
+        assert_eq!(CellValue::Bool(true).display(), "true");
+        assert_eq!(CellValue::Bool(false).display(), "false");
+    }
+
+    #[test]
+    fn test_integer_display() {
+        assert_eq!(CellValue::Int16(42).display(), "42");
+        assert_eq!(CellValue::Int32(-100).display(), "-100");
+        assert_eq!(CellValue::Int64(9_999_999).display(), "9999999");
+    }
+
+    #[test]
+    fn test_float_display() {
+        assert_eq!(CellValue::Float32(3.14).display(), "3.14");
+        assert_eq!(CellValue::Float64(2.718).display(), "2.718");
+    }
+
+    #[test]
+    fn test_text_display() {
+        assert_eq!(CellValue::Text("hello".into()).display(), "hello");
+    }
+
+    #[test]
+    fn test_bytes_display() {
+        assert_eq!(CellValue::Bytes(vec![1, 2, 3]).display(), "[3 bytes]");
+    }
+
+    #[test]
+    fn test_json_display() {
+        let val = serde_json::json!({"key": "value"});
+        let display = CellValue::Json(val).display();
+        assert!(display.contains("key"));
+        assert!(display.contains("value"));
+    }
+
+    #[test]
+    fn test_array_display() {
+        let arr = CellValue::Array(vec![
+            CellValue::Int32(1),
+            CellValue::Int32(2),
+            CellValue::Int32(3),
+        ]);
+        assert_eq!(arr.display(), "{1, 2, 3}");
+    }
+
+    #[test]
+    fn test_unknown_display() {
+        assert_eq!(CellValue::Unknown("raw".into()).display(), "raw");
+    }
+
+    // --- CellValue display_width ---
+
+    #[test]
+    fn test_display_width() {
+        assert_eq!(CellValue::Null.display_width(), 4); // "NULL"
+        assert_eq!(CellValue::Text("hello".into()).display_width(), 5);
+        assert_eq!(CellValue::Int32(100).display_width(), 3);
+    }
+
+    // --- QueryResult ---
+
+    #[test]
+    fn test_empty_result() {
+        let r = QueryResult::empty();
+        assert!(r.columns.is_empty());
+        assert!(r.rows.is_empty());
+        assert_eq!(r.row_count, 0);
+        assert!(r.error.is_none());
+        assert!(r.affected_rows.is_none());
+    }
+
+    #[test]
+    fn test_error_result() {
+        let r = QueryResult::error("bad query".into(), Duration::from_millis(10));
+        assert!(r.error.is_some());
+        assert_eq!(r.error.unwrap(), "bad query");
+        assert!(r.rows.is_empty());
+    }
+}
+
 fn extract_value(row: &Row, idx: usize, pg_type: &Type) -> CellValue {
     // Try to extract based on type
     match *pg_type {
