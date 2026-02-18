@@ -74,6 +74,94 @@ pub struct IndexInfo {
     pub is_primary: bool,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_type_icon() {
+        assert_eq!(TableType::Table.icon(), "󰓫");
+        assert_eq!(TableType::View.icon(), "󰈈");
+        assert_eq!(TableType::MaterializedView.icon(), "󰈈");
+        assert_eq!(TableType::ForeignTable.icon(), "󰒍");
+    }
+
+    #[test]
+    fn test_table_type_label() {
+        assert_eq!(TableType::Table.label(), "TABLE");
+        assert_eq!(TableType::View.label(), "VIEW");
+        assert_eq!(TableType::MaterializedView.label(), "MVIEW");
+        assert_eq!(TableType::ForeignTable.label(), "FOREIGN");
+    }
+
+    #[test]
+    fn test_table_type_equality() {
+        assert_eq!(TableType::Table, TableType::Table);
+        assert_ne!(TableType::Table, TableType::View);
+    }
+
+    #[test]
+    fn test_database_info_clone() {
+        let db = DatabaseInfo {
+            name: "testdb".into(),
+            owner: "postgres".into(),
+            encoding: "UTF8".into(),
+        };
+        let cloned = db.clone();
+        assert_eq!(cloned.name, "testdb");
+    }
+
+    #[test]
+    fn test_schema_info_clone() {
+        let schema = SchemaInfo {
+            name: "public".into(),
+            owner: "postgres".into(),
+        };
+        let cloned = schema.clone();
+        assert_eq!(cloned.name, "public");
+    }
+
+    #[test]
+    fn test_table_info_clone() {
+        let table = TableInfo {
+            name: "users".into(),
+            schema: "public".into(),
+            table_type: TableType::Table,
+            row_estimate: 1000,
+        };
+        let cloned = table.clone();
+        assert_eq!(cloned.name, "users");
+        assert_eq!(cloned.row_estimate, 1000);
+    }
+
+    #[test]
+    fn test_column_details() {
+        let col = ColumnDetails {
+            name: "id".into(),
+            data_type: "integer".into(),
+            is_nullable: false,
+            is_primary_key: true,
+            default_value: Some("nextval('users_id_seq')".into()),
+            ordinal_position: 1,
+        };
+        assert_eq!(col.name, "id");
+        assert!(col.is_primary_key);
+        assert!(!col.is_nullable);
+    }
+
+    #[test]
+    fn test_index_info() {
+        let idx = IndexInfo {
+            name: "users_pkey".into(),
+            columns: vec!["id".into()],
+            is_unique: true,
+            is_primary: true,
+        };
+        assert_eq!(idx.name, "users_pkey");
+        assert!(idx.is_primary);
+    }
+}
+
 pub async fn get_databases(client: &Client) -> Result<Vec<DatabaseInfo>> {
     let rows = client
         .query(

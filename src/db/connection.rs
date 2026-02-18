@@ -409,3 +409,210 @@ fn quote_conn_value(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
     format!("'{}'", escaped)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- ConnectionConfig ---
+
+    #[test]
+    fn test_default_config() {
+        let config = ConnectionConfig::default();
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 5432);
+        assert_eq!(config.database, "postgres");
+        assert_eq!(config.username, "postgres");
+        assert!(config.password.is_empty());
+        assert_eq!(config.ssl_mode, SslMode::Prefer);
+        assert!(!config.accept_invalid_certs);
+        assert!(config.ca_cert_path.is_none());
+        assert!(!config.use_aws_rds_certs);
+    }
+
+    #[test]
+    fn test_connection_string() {
+        let config = ConnectionConfig {
+            host: "myhost".into(),
+            port: 5433,
+            database: "mydb".into(),
+            username: "myuser".into(),
+            password: "mypass".into(),
+            ssl_mode: SslMode::Require,
+            ..Default::default()
+        };
+        let s = config.connection_string();
+        assert!(s.contains("host='myhost'"));
+        assert!(s.contains("port=5433"));
+        assert!(s.contains("dbname='mydb'"));
+        assert!(s.contains("user='myuser'"));
+        assert!(s.contains("password='mypass'"));
+        assert!(s.contains("sslmode=require"));
+    }
+
+    #[test]
+    fn test_connection_string_ssl_modes() {
+        let modes = vec![
+            (SslMode::Disable, "disable"),
+            (SslMode::Prefer, "prefer"),
+            (SslMode::Require, "require"),
+            (SslMode::VerifyCa, "verify-ca"),
+            (SslMode::VerifyFull, "verify-full"),
+        ];
+        for (mode, expected) in modes {
+            let config = ConnectionConfig {
+                ssl_mode: mode,
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .connection_string()
+                    .contains(&format!("sslmode={}", expected)),
+                "Expected sslmode={} for {:?}",
+                expected,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn test_display_string() {
+        let config = ConnectionConfig {
+            username: "admin".into(),
+            host: "db.example.com".into(),
+            port: 5432,
+            database: "production".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.display_string(),
+            "admin@db.example.com:5432/production"
+        );
+    }
+
+    #[test]
+    fn test_connection_string_escaping() {
+        let config = ConnectionConfig {
+            password: "pass'word\\test".into(),
+            ..Default::default()
+        };
+        let s = config.connection_string();
+        assert!(s.contains("pass\\'word\\\\test"));
+    }
+
+    // --- AWS RDS detection ---
+
+    #[test]
+    fn test_is_aws_rds_host() {
+        let config = ConnectionConfig {
+            host: "mydb.abc123.us-east-1.rds.amazonaws.com".into(),
+            ..Default::default()
+        };
+        assert!(config.is_aws_rds_host());
+    }
+
+    #[test]
+    fn test_is_not_aws_rds_host() {
+        let config = ConnectionConfig {
+            host: "localhost".into(),
+            ..Default::default()
+        };
+        assert!(!config.is_aws_rds_host());
+    }
+
+    #[test]
+    fn test_should_use_aws_rds_certs_auto() {
+        let config = ConnectionConfig {
+            host: "mydb.abc123.us-east-1.rds.amazonaws.com".into(),
+            ..Default::default()
+        };
+        assert!(config.should_use_aws_rds_certs());
+    }
+
+    #[test]
+    fn test_should_use_aws_rds_certs_explicit() {
+        let config = ConnectionConfig {
+            host: "custom-proxy.example.com".into(),
+            use_aws_rds_certs: true,
+            ..Default::default()
+        };
+        assert!(config.should_use_aws_rds_certs());
+    }
+
+    // --- ConnectionManager ---
+
+    #[test]
+    fn test_new_manager() {
+        let mgr = ConnectionManager::new();
+        assert!(!mgr.is_connected());
+        assert_eq!(mgr.current_database, "postgres");
+        assert_eq!(mgr.current_schema, "public");
+    }
+
+    // --- SSL mode default ---
+
+    #[test]
+    fn test_ssl_mode_default() {
+        let mode = SslMode::default();
+        assert_eq!(mode, SslMode::Prefer);
+    }
+
+    // --- quote_conn_value ---
+
+    #[test]
+    fn test_quote_simple() {
+        assert_eq!(quote_conn_value("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_quote_with_special_chars() {
+        assert_eq!(quote_conn_value("it's"), "'it\\'s'");
+        assert_eq!(quote_conn_value("back\\slash"), "'back\\\\slash'");
+    }
+
+    // --- base64 decoder ---
+
+    #[test]
+    fn test_base64_decode() {
+        let decoded = base64_decode("SGVsbG8gV29ybGQ=").unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World");
+    }
+
+    #[test]
+    fn test_base64_decode_no_padding() {
+        let decoded = base64_decode("SGVsbG8").unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_base64_decode_with_newlines() {
+        let decoded = base64_decode("SGVs\nbG8=").unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "Hello");
+    }
+
+    // --- Serialization ---
+
+    #[test]
+    fn test_config_serialization() {
+        let config = ConnectionConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("host"));
+        assert!(!toml_str.contains("password")); // password is skip_serializing
+    }
+
+    #[test]
+    fn test_config_deserialization() {
+        let toml_str = r#"
+            name = "Test"
+            host = "localhost"
+            port = 5432
+            database = "testdb"
+            username = "user"
+            ssl_mode = "Require"
+        "#;
+        let config: ConnectionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "Test");
+        assert_eq!(config.ssl_mode, SslMode::Require);
+        assert!(config.password.is_empty());
+    }
+}

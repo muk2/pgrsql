@@ -330,3 +330,168 @@ pub fn is_sql_keyword(word: &str) -> bool {
 pub fn is_sql_type(word: &str) -> bool {
     SQL_TYPES.contains(&word.to_uppercase().as_str())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Color;
+
+    // --- Theme construction ---
+
+    #[test]
+    fn test_dark_theme() {
+        let theme = Theme::dark();
+        match theme.bg_primary {
+            Color::Rgb(r, g, b) => assert!(r < 50 && g < 50 && b < 50),
+            _ => panic!("Expected RGB color"),
+        }
+    }
+
+    #[test]
+    fn test_light_theme() {
+        let theme = Theme::light();
+        match theme.bg_primary {
+            Color::Rgb(r, g, b) => assert!(r > 200 && g > 200 && b > 200),
+            _ => panic!("Expected RGB color"),
+        }
+    }
+
+    #[test]
+    fn test_default_is_dark() {
+        let default_theme = Theme::default();
+        let dark_theme = Theme::dark();
+        assert_eq!(default_theme.bg_primary, dark_theme.bg_primary);
+    }
+
+    // --- Style helpers ---
+
+    #[test]
+    fn test_normal_style() {
+        let theme = Theme::dark();
+        let style = theme.normal();
+        assert_eq!(style.fg, Some(theme.text_primary));
+        assert_eq!(style.bg, Some(theme.bg_primary));
+    }
+
+    #[test]
+    fn test_header_style_is_bold() {
+        let theme = Theme::dark();
+        let style = theme.header();
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_border_style_focused() {
+        let theme = Theme::dark();
+        let focused = theme.border_style(true);
+        let unfocused = theme.border_style(false);
+        assert_eq!(focused.fg, Some(theme.border_focused));
+        assert_eq!(unfocused.fg, Some(theme.border));
+    }
+
+    #[test]
+    fn test_status_styles() {
+        let theme = Theme::dark();
+        assert_eq!(theme.status_success().fg, Some(theme.success));
+        assert_eq!(theme.status_error().fg, Some(theme.error));
+        assert_eq!(theme.status_warning().fg, Some(theme.warning));
+    }
+
+    // --- SQL keyword detection ---
+
+    #[test]
+    fn test_is_sql_keyword() {
+        assert!(is_sql_keyword("SELECT"));
+        assert!(is_sql_keyword("FROM"));
+        assert!(is_sql_keyword("WHERE"));
+        assert!(is_sql_keyword("JOIN"));
+    }
+
+    #[test]
+    fn test_is_sql_keyword_case_insensitive() {
+        assert!(is_sql_keyword("select"));
+        assert!(is_sql_keyword("Select"));
+        assert!(is_sql_keyword("fRoM"));
+    }
+
+    #[test]
+    fn test_is_not_sql_keyword() {
+        assert!(!is_sql_keyword("users"));
+        assert!(!is_sql_keyword("foo"));
+        assert!(!is_sql_keyword("column_name"));
+    }
+
+    #[test]
+    fn test_keyword_categories() {
+        // DML
+        assert!(is_sql_keyword("INSERT"));
+        assert!(is_sql_keyword("UPDATE"));
+        assert!(is_sql_keyword("DELETE"));
+        // DDL
+        assert!(is_sql_keyword("CREATE"));
+        assert!(is_sql_keyword("ALTER"));
+        assert!(is_sql_keyword("DROP"));
+        // Window functions
+        assert!(is_sql_keyword("OVER"));
+        assert!(is_sql_keyword("PARTITION"));
+        assert!(is_sql_keyword("ROW_NUMBER"));
+        // CTEs
+        assert!(is_sql_keyword("WITH"));
+        assert!(is_sql_keyword("RECURSIVE"));
+    }
+
+    // --- SQL type detection ---
+
+    #[test]
+    fn test_is_sql_type() {
+        assert!(is_sql_type("INTEGER"));
+        assert!(is_sql_type("VARCHAR"));
+        assert!(is_sql_type("BOOLEAN"));
+        assert!(is_sql_type("JSON"));
+        assert!(is_sql_type("JSONB"));
+    }
+
+    #[test]
+    fn test_is_sql_type_case_insensitive() {
+        assert!(is_sql_type("integer"));
+        assert!(is_sql_type("varchar"));
+    }
+
+    #[test]
+    fn test_is_not_sql_type() {
+        assert!(!is_sql_type("SELECT"));
+        assert!(!is_sql_type("users"));
+    }
+
+    // --- List integrity ---
+
+    #[test]
+    fn test_keywords_are_uppercase() {
+        for kw in SQL_KEYWORDS {
+            assert_eq!(*kw, kw.to_uppercase(), "Keyword not uppercase: {}", kw);
+        }
+    }
+
+    #[test]
+    fn test_types_are_uppercase() {
+        for ty in SQL_TYPES {
+            assert_eq!(*ty, ty.to_uppercase(), "Type not uppercase: {}", ty);
+        }
+    }
+
+    #[test]
+    fn test_no_duplicate_keywords() {
+        let mut seen = std::collections::HashSet::new();
+        for kw in SQL_KEYWORDS {
+            assert!(seen.insert(*kw), "Duplicate keyword: {}", kw);
+        }
+    }
+
+    #[test]
+    fn test_no_duplicate_types() {
+        let mut seen = std::collections::HashSet::new();
+        for ty in SQL_TYPES {
+            assert!(seen.insert(*ty), "Duplicate type: {}", ty);
+        }
+    }
+}
