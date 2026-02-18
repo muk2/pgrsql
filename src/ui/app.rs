@@ -9,7 +9,7 @@ use crate::db::{
     ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
-use crate::ui::Theme;
+use crate::ui::{Theme, ThemeName};
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -198,8 +198,13 @@ impl App {
             initial_config.password.len(),
         ];
 
+        let theme = match Self::load_theme_preference() {
+            ThemeName::Dark => Theme::dark(),
+            ThemeName::Light => Theme::light(),
+        };
+
         Self {
-            theme: Theme::dark(),
+            theme,
             focus: Focus::ConnectionDialog,
             should_quit: false,
 
@@ -298,9 +303,46 @@ impl App {
         }
     }
 
+    pub fn toggle_theme(&mut self) {
+        let new_name = self.theme.name.toggle();
+        self.theme = match new_name {
+            ThemeName::Dark => Theme::dark(),
+            ThemeName::Light => Theme::light(),
+        };
+        Self::save_theme_preference(new_name);
+    }
+
+    fn save_theme_preference(theme_name: ThemeName) {
+        if let Some(config_dir) = dirs::config_dir() {
+            let pgrsql_dir = config_dir.join("pgrsql");
+            let _ = std::fs::create_dir_all(&pgrsql_dir);
+            let _ = std::fs::write(pgrsql_dir.join("theme"), theme_name.as_str());
+        }
+    }
+
+    fn load_theme_preference() -> ThemeName {
+        if let Some(config_dir) = dirs::config_dir() {
+            let path = config_dir.join("pgrsql").join("theme");
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return match content.trim() {
+                    "light" => ThemeName::Light,
+                    _ => ThemeName::Dark,
+                };
+            }
+        }
+        ThemeName::Dark
+    }
+
     pub async fn handle_input(&mut self, key: KeyEvent) -> Result<()> {
         // Global shortcuts
         match (key.code, key.modifiers) {
+            // Ctrl+Shift+T: Toggle theme (works in all contexts except connection dialog text input)
+            (KeyCode::Char('T'), m)
+                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+            {
+                self.toggle_theme();
+                return Ok(());
+            }
             (KeyCode::Char('?'), _) if self.focus != Focus::Editor => {
                 self.show_help = !self.show_help;
                 if self.show_help {
