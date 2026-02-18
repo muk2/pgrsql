@@ -9,6 +9,7 @@ use crate::db::{
     ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
+use crate::explain::{is_explain_query, parse_explain_output, QueryPlan};
 use crate::ui::Theme;
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -82,6 +83,11 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // EXPLAIN plan
+    pub explain_plans: Vec<Option<QueryPlan>>,
+    pub show_visual_plan: bool,
+    pub plan_scroll: usize,
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
@@ -240,6 +246,11 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+
+            explain_plans: Vec::new(),
+            show_visual_plan: true,
+            plan_scroll: 0,
+
             pending_connection: None,
         }
     }
@@ -817,6 +828,18 @@ impl App {
                     self.result_selected_col = 0;
                 }
             }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Toggle between visual plan and raw text for EXPLAIN results
+                if self
+                    .explain_plans
+                    .get(self.current_result)
+                    .and_then(|p| p.as_ref())
+                    .is_some()
+                {
+                    self.show_visual_plan = !self.show_visual_plan;
+                    self.plan_scroll = 0;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1049,10 +1072,31 @@ impl App {
                 );
             }
 
+            // Parse EXPLAIN plan if applicable
+            let plan = if is_explain_query(&query) {
+                // Build the text output from the result rows
+                let text: String = result
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.first().map(|cell| cell.display()))
+                    .collect::<Vec<String>>()
+                    .join("\n");
+                parse_explain_output(&text)
+            } else {
+                None
+            };
+
             self.results.push(result);
+            self.explain_plans.push(plan);
             self.current_result = self.results.len() - 1;
             self.result_selected_row = 0;
             self.result_selected_col = 0;
+            self.plan_scroll = 0;
+            self.show_visual_plan = self
+                .explain_plans
+                .last()
+                .map(|p| p.is_some())
+                .unwrap_or(false);
         } else {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }

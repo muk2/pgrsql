@@ -1,5 +1,6 @@
 mod db;
 mod editor;
+mod explain;
 mod ui;
 
 use crate::db::ConnectionManager;
