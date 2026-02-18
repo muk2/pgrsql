@@ -11,7 +11,7 @@ use crate::ui::{
     is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
 };
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     // Create main layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -30,6 +30,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
         .split(chunks[1]);
+
+    // Store layout rects for mouse support
+    let panel_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40), // Editor
+            Constraint::Min(0),         // Results
+        ])
+        .split(main_chunks[1]);
+
+    app.layout.sidebar = main_chunks[0];
+    app.layout.editor = panel_chunks[0];
+    app.layout.results = panel_chunks[1];
+    app.layout.status_bar = chunks[2];
 
     draw_sidebar(frame, app, main_chunks[0]);
     draw_main_panel(frame, app, main_chunks[1]);
