@@ -1,3 +1,4 @@
+mod bookmarks;
 mod db;
 mod editor;
 mod ui;
