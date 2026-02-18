@@ -390,3 +390,461 @@ impl TextBuffer {
         self.lines.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Construction ---
+
+    #[test]
+    fn test_new_buffer() {
+        let buf = TextBuffer::new();
+        assert_eq!(buf.lines, vec![""]);
+        assert_eq!(buf.cursor_x, 0);
+        assert_eq!(buf.cursor_y, 0);
+        assert!(buf.selection_start.is_none());
+        assert!(!buf.modified);
+    }
+
+    #[test]
+    fn test_default_buffer() {
+        let buf = TextBuffer::default();
+        assert_eq!(buf.lines, vec![""]);
+    }
+
+    #[test]
+    fn test_from_text_single_line() {
+        let buf = TextBuffer::from_text("hello");
+        assert_eq!(buf.lines, vec!["hello"]);
+        assert_eq!(buf.cursor_x, 0);
+        assert_eq!(buf.cursor_y, 0);
+    }
+
+    #[test]
+    fn test_from_text_multi_line() {
+        let buf = TextBuffer::from_text("line1\nline2\nline3");
+        assert_eq!(buf.lines, vec!["line1", "line2", "line3"]);
+    }
+
+    #[test]
+    fn test_from_text_empty() {
+        let buf = TextBuffer::from_text("");
+        assert_eq!(buf.lines, vec![""]);
+    }
+
+    // --- Text retrieval ---
+
+    #[test]
+    fn test_text_round_trip() {
+        let original = "SELECT *\nFROM users\nWHERE id = 1";
+        let buf = TextBuffer::from_text(original);
+        assert_eq!(buf.text(), original);
+    }
+
+    #[test]
+    fn test_current_line() {
+        let buf = TextBuffer::from_text("line1\nline2");
+        assert_eq!(buf.current_line(), "line1");
+    }
+
+    #[test]
+    fn test_line_count() {
+        let buf = TextBuffer::from_text("a\nb\nc");
+        assert_eq!(buf.line_count(), 3);
+    }
+
+    // --- Insertion ---
+
+    #[test]
+    fn test_insert_char() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        assert_eq!(buf.text(), "a");
+        assert_eq!(buf.cursor_x, 1);
+        assert!(buf.modified);
+    }
+
+    #[test]
+    fn test_insert_char_middle_of_line() {
+        let mut buf = TextBuffer::from_text("ac");
+        buf.cursor_x = 1;
+        buf.insert_char('b');
+        assert_eq!(buf.text(), "abc");
+        assert_eq!(buf.cursor_x, 2);
+    }
+
+    #[test]
+    fn test_insert_newline() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 5;
+        buf.insert_newline();
+        assert_eq!(buf.lines, vec!["hello", " world"]);
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_insert_text_multiline() {
+        let mut buf = TextBuffer::new();
+        buf.insert_text("hello\nworld");
+        assert_eq!(buf.lines, vec!["hello", "world"]);
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_insert_tab() {
+        let mut buf = TextBuffer::new();
+        buf.insert_tab();
+        assert_eq!(buf.text(), "    ");
+        assert_eq!(buf.cursor_x, 4);
+    }
+
+    // --- Deletion ---
+
+    #[test]
+    fn test_backspace_middle() {
+        let mut buf = TextBuffer::from_text("abc");
+        buf.cursor_x = 2;
+        buf.backspace();
+        assert_eq!(buf.text(), "ac");
+        assert_eq!(buf.cursor_x, 1);
+    }
+
+    #[test]
+    fn test_backspace_at_start_merges_lines() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_y = 1;
+        buf.cursor_x = 0;
+        buf.backspace();
+        assert_eq!(buf.lines, vec!["line1line2"]);
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_backspace_at_beginning_does_nothing() {
+        let mut buf = TextBuffer::new();
+        buf.backspace();
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_delete_middle() {
+        let mut buf = TextBuffer::from_text("abc");
+        buf.cursor_x = 1;
+        buf.delete();
+        assert_eq!(buf.text(), "ac");
+    }
+
+    #[test]
+    fn test_delete_at_end_merges_lines() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_x = 5;
+        buf.delete();
+        assert_eq!(buf.lines, vec!["line1line2"]);
+    }
+
+    #[test]
+    fn test_delete_at_end_of_last_line_does_nothing() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.cursor_x = 5;
+        buf.delete();
+        assert_eq!(buf.text(), "hello");
+    }
+
+    // --- Cursor movement ---
+
+    #[test]
+    fn test_move_left() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.cursor_x = 3;
+        buf.move_left();
+        assert_eq!(buf.cursor_x, 2);
+    }
+
+    #[test]
+    fn test_move_left_wraps_to_previous_line() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_y = 1;
+        buf.cursor_x = 0;
+        buf.move_left();
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_move_right() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.cursor_x = 2;
+        buf.move_right();
+        assert_eq!(buf.cursor_x, 3);
+    }
+
+    #[test]
+    fn test_move_right_wraps_to_next_line() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_x = 5;
+        buf.move_right();
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_move_up() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_y = 1;
+        buf.cursor_x = 3;
+        buf.move_up();
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 3);
+    }
+
+    #[test]
+    fn test_move_up_clamps_cursor_x() {
+        let mut buf = TextBuffer::from_text("hi\nlong line");
+        buf.cursor_y = 1;
+        buf.cursor_x = 8;
+        buf.move_up();
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 2); // clamped to length of "hi"
+    }
+
+    #[test]
+    fn test_move_down() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.move_down();
+        assert_eq!(buf.cursor_y, 1);
+    }
+
+    #[test]
+    fn test_move_to_line_start() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.cursor_x = 3;
+        buf.move_to_line_start();
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_move_to_line_end() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.move_to_line_end();
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_move_to_start() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_y = 1;
+        buf.cursor_x = 3;
+        buf.move_to_start();
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_move_to_end() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.move_to_end();
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    // --- Word movement ---
+
+    #[test]
+    fn test_move_word_left() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 11;
+        buf.move_word_left();
+        assert_eq!(buf.cursor_x, 6);
+        buf.move_word_left();
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_move_word_right() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.move_word_right();
+        assert_eq!(buf.cursor_x, 6);
+        buf.move_word_right();
+        assert_eq!(buf.cursor_x, 11);
+    }
+
+    #[test]
+    fn test_move_word_left_across_lines() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_y = 1;
+        buf.cursor_x = 0;
+        buf.move_word_left();
+        assert_eq!(buf.cursor_y, 0);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_move_word_right_across_lines() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.cursor_x = 5;
+        buf.move_word_right();
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    // --- Selection ---
+
+    #[test]
+    fn test_selection_start_and_get() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 2;
+        buf.start_selection();
+        buf.cursor_x = 7;
+        let sel = buf.get_selection().unwrap();
+        assert_eq!(sel, ((2, 0), (7, 0)));
+    }
+
+    #[test]
+    fn test_get_selected_text_same_line() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 0;
+        buf.start_selection();
+        buf.cursor_x = 5;
+        assert_eq!(buf.get_selected_text().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_get_selected_text_multi_line() {
+        let mut buf = TextBuffer::from_text("line1\nline2\nline3");
+        buf.cursor_x = 3;
+        buf.cursor_y = 0;
+        buf.start_selection();
+        buf.cursor_y = 2;
+        buf.cursor_x = 2;
+        let text = buf.get_selected_text().unwrap();
+        assert_eq!(text, "e1\nline2\nli");
+    }
+
+    #[test]
+    fn test_select_all() {
+        let mut buf = TextBuffer::from_text("line1\nline2");
+        buf.select_all();
+        assert_eq!(buf.selection_start, Some((0, 0)));
+        assert_eq!(buf.cursor_y, 1);
+        assert_eq!(buf.cursor_x, 5);
+    }
+
+    #[test]
+    fn test_select_line() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.select_line();
+        assert_eq!(buf.selection_start, Some((0, 0)));
+        assert_eq!(buf.cursor_x, 11);
+    }
+
+    #[test]
+    fn test_delete_selection_same_line() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 0;
+        buf.start_selection();
+        buf.cursor_x = 6;
+        buf.delete_selection();
+        assert_eq!(buf.text(), "world");
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_delete_selection_multi_line() {
+        let mut buf = TextBuffer::from_text("line1\nline2\nline3");
+        buf.cursor_x = 3;
+        buf.cursor_y = 0;
+        buf.start_selection();
+        buf.cursor_y = 2;
+        buf.cursor_x = 3;
+        buf.delete_selection();
+        assert_eq!(buf.text(), "line3");
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut buf = TextBuffer::new();
+        buf.start_selection();
+        assert!(buf.has_selection());
+        buf.clear_selection();
+        assert!(!buf.has_selection());
+    }
+
+    // --- Clear / Set ---
+
+    #[test]
+    fn test_clear() {
+        let mut buf = TextBuffer::from_text("something");
+        buf.cursor_x = 5;
+        buf.modified = true;
+        buf.clear();
+        assert_eq!(buf.text(), "");
+        assert_eq!(buf.cursor_x, 0);
+        assert_eq!(buf.cursor_y, 0);
+        assert!(!buf.modified);
+    }
+
+    #[test]
+    fn test_set_text() {
+        let mut buf = TextBuffer::from_text("old");
+        buf.set_text("new\ncontent");
+        assert_eq!(buf.lines, vec!["new", "content"]);
+        assert_eq!(buf.cursor_x, 0);
+        assert_eq!(buf.cursor_y, 0);
+        assert!(!buf.modified);
+    }
+
+    // --- Scroll ---
+
+    #[test]
+    fn test_ensure_cursor_visible_scrolls_down() {
+        let mut buf = TextBuffer::from_text("1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+        buf.cursor_y = 8;
+        buf.ensure_cursor_visible(5);
+        assert_eq!(buf.scroll_offset, 4);
+    }
+
+    #[test]
+    fn test_ensure_cursor_visible_scrolls_up() {
+        let mut buf = TextBuffer::from_text("1\n2\n3\n4\n5");
+        buf.scroll_offset = 3;
+        buf.cursor_y = 1;
+        buf.ensure_cursor_visible(5);
+        assert_eq!(buf.scroll_offset, 1);
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_backspace_with_selection() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 0;
+        buf.start_selection();
+        buf.cursor_x = 5;
+        buf.backspace();
+        assert_eq!(buf.text(), " world");
+    }
+
+    #[test]
+    fn test_delete_with_selection() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 6;
+        buf.start_selection();
+        buf.cursor_x = 11;
+        buf.delete();
+        assert_eq!(buf.text(), "hello ");
+    }
+
+    #[test]
+    fn test_insert_char_replaces_selection() {
+        let mut buf = TextBuffer::from_text("hello");
+        buf.cursor_x = 0;
+        buf.start_selection();
+        buf.cursor_x = 5;
+        buf.insert_char('X');
+        assert_eq!(buf.text(), "X");
+    }
+}
