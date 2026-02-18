@@ -9,7 +9,7 @@ use crate::db::{
     ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
-use crate::ui::Theme;
+use crate::ui::{Theme, SQL_KEYWORDS, SQL_TYPES};
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -82,6 +82,9 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Autocomplete
+    pub autocomplete: AutocompleteState,
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
@@ -167,6 +170,103 @@ impl Default for ConnectionDialogState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AutocompleteSuggestion {
+    pub text: String,
+    pub kind: SuggestionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+pub enum SuggestionKind {
+    Keyword,
+    Type,
+    Table,
+    Column,
+    Function,
+}
+
+impl SuggestionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SuggestionKind::Keyword => "KW",
+            SuggestionKind::Type => "TY",
+            SuggestionKind::Table => "TB",
+            SuggestionKind::Column => "CL",
+            SuggestionKind::Function => "FN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AutocompleteState {
+    pub active: bool,
+    pub suggestions: Vec<AutocompleteSuggestion>,
+    pub selected: usize,
+    pub prefix: String,
+}
+
+pub const SQL_FUNCTIONS: &[&str] = &[
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "COALESCE",
+    "NULLIF",
+    "CAST",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "EXTRACT",
+    "DATE_TRUNC",
+    "TO_CHAR",
+    "TO_DATE",
+    "TO_NUMBER",
+    "TO_TIMESTAMP",
+    "CONCAT",
+    "LENGTH",
+    "LOWER",
+    "UPPER",
+    "TRIM",
+    "SUBSTRING",
+    "REPLACE",
+    "POSITION",
+    "LEFT",
+    "RIGHT",
+    "LPAD",
+    "RPAD",
+    "SPLIT_PART",
+    "STRING_AGG",
+    "ARRAY_AGG",
+    "JSON_AGG",
+    "JSONB_AGG",
+    "JSON_BUILD_OBJECT",
+    "JSONB_BUILD_OBJECT",
+    "ROW_NUMBER",
+    "RANK",
+    "DENSE_RANK",
+    "LAG",
+    "LEAD",
+    "FIRST_VALUE",
+    "LAST_VALUE",
+    "NTILE",
+    "GREATEST",
+    "LEAST",
+    "ABS",
+    "CEIL",
+    "FLOOR",
+    "ROUND",
+    "MOD",
+    "POWER",
+    "SQRT",
+    "RANDOM",
+    "GEN_RANDOM_UUID",
+    "PG_SIZE_PRETTY",
+    "PG_TOTAL_RELATION_SIZE",
+    "PG_RELATION_SIZE",
+];
+
 impl App {
     pub fn new() -> Self {
         let query_history = QueryHistory::load().unwrap_or_default();
@@ -240,6 +340,7 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            autocomplete: AutocompleteState::default(),
             pending_connection: None,
         }
     }
@@ -641,6 +742,46 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+        // Handle autocomplete navigation when active
+        if self.autocomplete.active {
+            match key.code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    self.accept_autocomplete();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.autocomplete.active = false;
+                    return Ok(());
+                }
+                KeyCode::Up => {
+                    if self.autocomplete.selected > 0 {
+                        self.autocomplete.selected -= 1;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    if self.autocomplete.selected
+                        < self.autocomplete.suggestions.len().saturating_sub(1)
+                    {
+                        self.autocomplete.selected += 1;
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    // Fall through to normal handling, but dismiss autocomplete for non-text keys
+                    if !matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace) {
+                        self.autocomplete.active = false;
+                    }
+                }
+            }
+        }
+
+        // Ctrl+Space triggers autocomplete
+        if ctrl && key.code == KeyCode::Char(' ') {
+            self.update_autocomplete();
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Tab if !ctrl => {
                 if shift {
@@ -653,17 +794,18 @@ impl App {
                 self.focus = Focus::Sidebar;
             }
             KeyCode::Enter if ctrl => {
-                // Execute query
+                self.autocomplete.active = false;
                 self.execute_query().await?;
                 self.focus = Focus::Results;
             }
             KeyCode::F(5) => {
-                // F5 also executes query (works in all terminals)
+                self.autocomplete.active = false;
                 self.execute_query().await?;
                 self.focus = Focus::Results;
             }
             KeyCode::Enter => {
                 self.editor.insert_newline();
+                self.autocomplete.active = false;
             }
             KeyCode::Char('c') if ctrl => {
                 self.editor.copy();
@@ -681,47 +823,53 @@ impl App {
                 // Undo (not implemented yet)
             }
             KeyCode::Char('l') if ctrl => {
-                // Clear editor
                 self.editor.clear();
+                self.autocomplete.active = false;
             }
             KeyCode::Up if ctrl => {
-                // Previous in history
                 if let Some(entry) = self.query_history.previous() {
                     self.editor.set_text(&entry.query);
                 }
             }
             KeyCode::Down if ctrl => {
-                // Next in history
                 if let Some(entry) = self.query_history.next() {
                     self.editor.set_text(&entry.query);
                 }
             }
             KeyCode::Char(c) => {
                 self.editor.insert_char(c);
+                self.update_autocomplete();
             }
             KeyCode::Backspace => {
                 self.editor.backspace();
+                self.update_autocomplete();
             }
             KeyCode::Delete => {
                 self.editor.delete();
             }
             KeyCode::Left if ctrl => {
                 self.editor.move_word_left();
+                self.autocomplete.active = false;
             }
             KeyCode::Right if ctrl => {
                 self.editor.move_word_right();
+                self.autocomplete.active = false;
             }
             KeyCode::Left => {
                 self.editor.move_left();
+                self.autocomplete.active = false;
             }
             KeyCode::Right => {
                 self.editor.move_right();
+                self.autocomplete.active = false;
             }
             KeyCode::Up => {
                 self.editor.move_up();
+                self.autocomplete.active = false;
             }
             KeyCode::Down => {
                 self.editor.move_down();
+                self.autocomplete.active = false;
             }
             KeyCode::Home if ctrl => {
                 self.editor.move_to_start();
@@ -1058,6 +1206,101 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn update_autocomplete(&mut self) {
+        let line = self.editor.current_line().to_string();
+        let cursor_x = self.editor.cursor_x;
+
+        // Extract the word being typed (prefix)
+        let before_cursor = &line[..cursor_x.min(line.len())];
+        let prefix_start = before_cursor
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &before_cursor[prefix_start..];
+
+        if prefix.len() < 2 {
+            self.autocomplete.active = false;
+            return;
+        }
+
+        let prefix_upper = prefix.to_uppercase();
+        let prefix_lower = prefix.to_lowercase();
+
+        let mut suggestions: Vec<AutocompleteSuggestion> = Vec::new();
+
+        // Table names from loaded schema
+        for table in &self.tables {
+            if table.name.to_lowercase().starts_with(&prefix_lower) {
+                suggestions.push(AutocompleteSuggestion {
+                    text: table.name.clone(),
+                    kind: SuggestionKind::Table,
+                });
+            }
+        }
+
+        // SQL keywords
+        for &kw in SQL_KEYWORDS {
+            if kw.starts_with(&prefix_upper) {
+                suggestions.push(AutocompleteSuggestion {
+                    text: kw.to_string(),
+                    kind: SuggestionKind::Keyword,
+                });
+            }
+        }
+
+        // SQL types
+        for &ty in SQL_TYPES {
+            if ty.starts_with(&prefix_upper) {
+                suggestions.push(AutocompleteSuggestion {
+                    text: ty.to_string(),
+                    kind: SuggestionKind::Type,
+                });
+            }
+        }
+
+        // SQL functions
+        for &func in SQL_FUNCTIONS {
+            if func.starts_with(&prefix_upper) {
+                suggestions.push(AutocompleteSuggestion {
+                    text: format!("{}()", func),
+                    kind: SuggestionKind::Function,
+                });
+            }
+        }
+
+        // Limit to 10 suggestions
+        suggestions.truncate(10);
+
+        if suggestions.is_empty() {
+            self.autocomplete.active = false;
+        } else {
+            self.autocomplete.active = true;
+            self.autocomplete.suggestions = suggestions;
+            self.autocomplete.selected = 0;
+            self.autocomplete.prefix = prefix.to_string();
+        }
+    }
+
+    fn accept_autocomplete(&mut self) {
+        if let Some(suggestion) = self
+            .autocomplete
+            .suggestions
+            .get(self.autocomplete.selected)
+        {
+            let text = suggestion.text.clone();
+            let prefix_len = self.autocomplete.prefix.len();
+
+            // Delete the prefix
+            for _ in 0..prefix_len {
+                self.editor.backspace();
+            }
+
+            // Insert the suggestion
+            self.editor.insert_text(&text);
+        }
+        self.autocomplete.active = false;
     }
 
     fn copy_selected_cell(&mut self) {
