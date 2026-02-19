@@ -1,0 +1,82 @@
+name: Lean Verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lean/**'
+      - '.github/workflows/lean.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'lean/**'
+      - '.github/workflows/lean.yml'
+
+jobs:
+  verify:
+    name: Build & Verify Proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache Lean build artifacts
+        uses: actions/cache@v4
+        with:
+          path: lean/.lake
+          key: lean-${{ runner.os }}-${{ hashFiles('lean/lean-toolchain', 'lean/lakefile.toml') }}
+          restore-keys: |
+            lean-${{ runner.os }}-
+
+      - name: Build and verify all proofs
+        working-directory: lean
+        run: lake build
+
+      - name: Check for sorry usage
+        working-directory: lean
+        run: |
+          echo "=== Checking for sorry usage in proof files ==="
+          SORRY_COUNT=$(grep -r "sorry" Verification/ --include="*.lean" -c || echo "0")
+          echo "Files with sorry:"
+          grep -rn "sorry" Verification/ --include="*.lean" || echo "None found"
+          echo ""
+          echo "Note: sorry marks incomplete proofs (Phase 2 targets)."
+          echo "All other theorems are fully machine-checked."
+
+  lint:
+    name: Lean Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache Lean build artifacts
+        uses: actions/cache@v4
+        with:
+          path: lean/.lake
+          key: lean-lint-${{ runner.os }}-${{ hashFiles('lean/lean-toolchain', 'lean/lakefile.toml') }}
+          restore-keys: |
+            lean-lint-${{ runner.os }}-
+
+      - name: Check that Lean files are well-formed
+        working-directory: lean
+        run: |
+          echo "=== Verifying Lean project structure ==="
+          echo "Lean toolchain:"
+          cat lean-toolchain
+          echo ""
+          echo "Project configuration:"
+          cat lakefile.toml
+          echo ""
+          echo "Module structure:"
+          find Verification -name "*.lean" | sort
+          echo ""
+          lake build
