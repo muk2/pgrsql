@@ -5,8 +5,9 @@ use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 
 use crate::db::{
-    create_client, execute_query, get_databases, get_schemas, get_tables, ColumnDetails,
-    ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
+    create_client, execute_query, get_columns, get_databases, get_indexes, get_schemas,
+    get_table_ddl, get_tables, ColumnDetails, ConnectionConfig, ConnectionManager, DatabaseInfo,
+    IndexInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::ui::Theme;
@@ -20,7 +21,19 @@ pub enum Focus {
     Results,
     ConnectionDialog,
     Help,
+    TableInspector,
     ExportPicker,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableInspectorState {
+    pub table_name: String,
+    pub schema_name: String,
+    pub columns: Vec<ColumnDetails>,
+    pub indexes: Vec<IndexInfo>,
+    pub ddl: String,
+    pub show_ddl: bool,
+    pub scroll: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -125,6 +138,9 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Table Inspector
+    pub table_inspector: Option<TableInspectorState>,
 
     // Export
     pub export_selected: usize,
@@ -288,6 +304,7 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            table_inspector: None,
             export_selected: 0,
             pending_connection: None,
         }
@@ -373,6 +390,7 @@ impl App {
             Focus::Editor => self.handle_editor_input(key).await,
             Focus::Results => self.handle_results_input(key).await,
             Focus::Help => self.handle_help_input(key).await,
+            Focus::TableInspector => self.handle_table_inspector_input(key).await,
             Focus::ExportPicker => self.handle_export_input(key).await,
         }
     }
@@ -682,6 +700,9 @@ impl App {
                 self.focus = Focus::ConnectionDialog;
                 self.connection_dialog.active = true;
             }
+            KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_table_inspector().await;
+            }
             _ => {}
         }
         Ok(())
@@ -943,6 +964,56 @@ impl App {
         Ok(())
     }
 
+    async fn handle_table_inspector_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.table_inspector = None;
+                self.focus = Focus::Sidebar;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.show_ddl = !inspector.show_ddl;
+                    inspector.scroll = 0;
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(ref inspector) = self.table_inspector {
+                    if inspector.show_ddl {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&inspector.ddl);
+                            self.set_status(
+                                "DDL copied to clipboard".to_string(),
+                                StatusType::Success,
+                            );
+                        }
+                    }
+                }
+            }
+            KeyCode::Up => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll = inspector.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll = inspector.scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll += 10;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn handle_export_input(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
@@ -974,6 +1045,67 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    async fn open_table_inspector(&mut self) {
+        if self.sidebar_tab != SidebarTab::Tables || self.connection.client.is_none() {
+            return;
+        }
+
+        // Find the selected table from the sidebar
+        let mut index = 0;
+        let mut target_table: Option<(String, String)> = None;
+
+        for schema in &self.schemas {
+            if index == self.sidebar_selected {
+                // Schema is selected, not a table
+                return;
+            }
+            index += 1;
+
+            if self.expanded_schemas.contains(&schema.name) {
+                for table in &self.tables {
+                    if table.schema == schema.name {
+                        if index == self.sidebar_selected {
+                            target_table = Some((schema.name.clone(), table.name.clone()));
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                if target_table.is_some() {
+                    break;
+                }
+            }
+        }
+
+        let (schema_name, table_name) = match target_table {
+            Some(t) => t,
+            None => return,
+        };
+
+        let client = self.connection.client.as_ref().unwrap();
+
+        let columns = get_columns(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_default();
+        let indexes = get_indexes(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_default();
+        let ddl = get_table_ddl(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_else(|_| "-- DDL generation failed".to_string());
+
+        self.table_inspector = Some(TableInspectorState {
+            table_name,
+            schema_name,
+            columns,
+            indexes,
+            ddl,
+            show_ddl: false,
+            scroll: 0,
+        });
+        self.focus = Focus::TableInspector;
     }
 
     fn perform_export(&mut self, format: ExportFormat) {

@@ -9,8 +9,7 @@ use ratatui::{
 use crate::db::SslMode;
 use crate::ui::{
     is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
-    EXPORT_FORMATS,
-    SPINNER_FRAMES,
+    EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -42,6 +41,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw toasts
     if !app.show_help {
         draw_toasts(frame, app);
+    }
+
+    // Draw table inspector if active
+    if app.table_inspector.is_some() {
+        draw_table_inspector(frame, app);
     }
 
     // Draw connection dialog if active
@@ -1070,6 +1074,127 @@ fn draw_toasts(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_table_inspector(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let inspector = match &app.table_inspector {
+        Some(i) => i,
+        None => return,
+    };
+
+    let area = frame.area();
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = (area.height - 4).min(30);
+    let x = (area.width - width) / 2;
+    let y = (area.height - height) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, dialog_area);
+
+    let title = format!(
+        " Table: {}.{} ",
+        inspector.schema_name, inspector.table_name
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if inspector.show_ddl {
+        // DDL view
+        for ddl_line in inspector.ddl.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", ddl_line),
+                Style::default().fg(theme.text_primary),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [D] Structure  [Ctrl+C] Copy DDL  [Esc] Close",
+            Style::default().fg(theme.text_muted),
+        )));
+    } else {
+        // Structure view
+        lines.push(Line::from(Span::styled(
+            "  COLUMNS",
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        for col in &inspector.columns {
+            let pk = if col.is_primary_key { " PK" } else { "" };
+            let nullable = if col.is_nullable { "NULL" } else { "NOT NULL" };
+            let default = col
+                .default_value
+                .as_ref()
+                .map(|d| format!(" DEFAULT {}", d))
+                .unwrap_or_default();
+            let line_text = format!(
+                "  {:<20} {:<15} {:<8}{}{}",
+                col.name, col.data_type, nullable, pk, default
+            );
+            let style = if col.is_primary_key {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+            lines.push(Line::from(Span::styled(line_text, style)));
+        }
+
+        if !inspector.indexes.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  INDEXES",
+                Style::default()
+                    .fg(theme.text_accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            for idx in &inspector.indexes {
+                let kind = if idx.is_primary {
+                    "PRIMARY"
+                } else if idx.is_unique {
+                    "UNIQUE"
+                } else {
+                    ""
+                };
+                let line_text = format!("  {:<30} ({}) {}", idx.name, idx.columns.join(", "), kind);
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(theme.text_primary),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [D] DDL  [Esc] Close",
+            Style::default().fg(theme.text_muted),
+        )));
+    }
+
+    // Apply scrolling
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(inspector.scroll)
+        .take(inner.height as usize)
+        .collect();
+
+    let paragraph = Paragraph::new(visible);
+    frame.render_widget(paragraph, inner);
+}
+
 fn draw_export_picker(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
@@ -1185,6 +1310,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   1/2/3          Switch tabs",
         "   Enter          Select item",
         "   ↑/↓            Navigate",
+        "   Ctrl+I         Inspect table (DDL)",
         "",
         " RESULTS",
         "   Tab/Shift+Tab  Next/Prev column",
