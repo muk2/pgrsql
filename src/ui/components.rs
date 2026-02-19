@@ -8,7 +8,8 @@ use ratatui::{
 
 use crate::db::SslMode;
 use crate::ui::{
-    is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
+    is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
+    SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -272,8 +273,8 @@ fn draw_main_panel(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40), // Editor
-            Constraint::Min(0),         // Results
+            Constraint::Percentage(app.editor_height_percent), // Editor (resizable)
+            Constraint::Min(0),                                // Results
         ])
         .split(area);
 
@@ -310,6 +311,9 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         area,
     );
 
+    // Determine active query range for visual highlighting
+    let query_range = app.get_current_query_line_range();
+
     // Syntax highlight and render editor content
     let visible_height = inner_area.height as usize;
     let lines: Vec<Line> = app
@@ -321,16 +325,19 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(line_idx, line_text)| {
             let actual_line = line_idx + app.editor.scroll_offset;
-            highlight_sql_line(line_text, theme, actual_line, &app.editor)
+            let in_active_query = query_range
+                .map(|(start, end)| actual_line >= start && actual_line <= end)
+                .unwrap_or(false);
+            highlight_sql_line(line_text, theme, actual_line, &app.editor, in_active_query)
         })
         .collect();
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner_area);
 
-    // Show cursor
+    // Show cursor (offset by 2 for gutter prefix)
     if focused {
-        let cursor_x = inner_area.x + app.editor.cursor_x as u16;
+        let cursor_x = inner_area.x + 2 + app.editor.cursor_x as u16;
         let cursor_y = inner_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
         if cursor_y < inner_area.y + inner_area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -338,28 +345,70 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Determine if a line starts inside a block comment by scanning all previous lines.
+fn is_in_block_comment(lines: &[String], current_line: usize) -> bool {
+    let mut depth = 0i32;
+    for line in lines.iter().take(current_line) {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
+                depth += 1;
+                i += 2;
+            } else if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '/' {
+                depth = (depth - 1).max(0);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    depth > 0
+}
+
 fn highlight_sql_line<'a>(
     line: &'a str,
     theme: &Theme,
     line_number: usize,
     editor: &crate::editor::TextBuffer,
+    in_active_query: bool,
 ) -> Line<'a> {
     let mut spans: Vec<Span> = Vec::new();
     let mut current_word = String::new();
     let mut in_string = false;
     let mut string_char = '"';
-    let in_comment = false;
+    let mut in_block_comment = is_in_block_comment(&editor.lines, line_number);
 
-    for (i, c) in line.char_indices() {
-        // Check for selection
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    // Show a gutter marker for the active query block
+    if in_active_query {
+        spans.push(Span::styled(
+            "\u{2502} ".to_string(), // "│ " vertical bar
+            Style::default().fg(theme.text_accent),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "  ".to_string(),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+
+    while i < len {
+        let c = chars[i];
+        // Compute byte index for selection check
+        let byte_idx: usize = chars[..i].iter().map(|ch| ch.len_utf8()).sum();
+
         let is_selected = if let Some(((start_x, start_y), (end_x, end_y))) = editor.get_selection()
         {
             if start_y == end_y && line_number == start_y {
-                i >= start_x && i < end_x
+                byte_idx >= start_x && byte_idx < end_x
             } else if line_number == start_y {
-                i >= start_x
+                byte_idx >= start_x
             } else if line_number == end_y {
-                i < end_x
+                byte_idx < end_x
             } else {
                 line_number > start_y && line_number < end_y
             }
@@ -373,22 +422,61 @@ fn highlight_sql_line<'a>(
             Style::default()
         };
 
-        // Handle comments
-        if !in_string && line[i..].starts_with("--") {
+        // Handle block comments
+        if in_block_comment {
+            if i + 1 < len && c == '*' && chars[i + 1] == '/' {
+                spans.push(Span::styled(
+                    "*/".to_string(),
+                    base_style.fg(theme.syntax_comment),
+                ));
+                in_block_comment = false;
+                i += 2;
+            } else {
+                spans.push(Span::styled(
+                    c.to_string(),
+                    base_style.fg(theme.syntax_comment),
+                ));
+                i += 1;
+            }
+            continue;
+        }
+
+        // Start block comment
+        if !in_string && i + 1 < len && c == '/' && chars[i + 1] == '*' {
             if !current_word.is_empty() {
                 spans.push(create_word_span(&current_word, theme, base_style));
                 current_word.clear();
             }
             spans.push(Span::styled(
-                line[i..].to_string(),
+                "/*".to_string(),
                 base_style.fg(theme.syntax_comment),
             ));
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        // Handle line comments
+        if !in_string && i + 1 < len && c == '-' && chars[i + 1] == '-' {
+            if !current_word.is_empty() {
+                spans.push(create_word_span(&current_word, theme, base_style));
+                current_word.clear();
+            }
+            let rest: String = chars[i..].iter().collect();
+            spans.push(Span::styled(rest, base_style.fg(theme.syntax_comment)));
             break;
         }
 
         // Handle strings
-        if (c == '\'' || c == '"') && !in_comment {
+        if (c == '\'' || c == '"') && !in_block_comment {
             if in_string && c == string_char {
+                // Check for escaped quotes ('')
+                if c == '\'' && i + 1 < len && chars[i + 1] == '\'' {
+                    current_word.push(c);
+                    current_word.push(c);
+                    i += 2;
+                    continue;
+                }
                 current_word.push(c);
                 spans.push(Span::styled(
                     current_word.clone(),
@@ -407,12 +495,44 @@ fn highlight_sql_line<'a>(
             } else {
                 current_word.push(c);
             }
+            i += 1;
             continue;
         }
 
         if in_string {
             current_word.push(c);
+            i += 1;
             continue;
+        }
+
+        // Handle PostgreSQL operators: ::, ->, ->>, #>, #>>, @>, <@, ?|, ?&, ||
+        if i + 1 < len {
+            let two_char: String = chars[i..i + 2].iter().collect();
+            let is_pg_operator = matches!(
+                two_char.as_str(),
+                "::" | "->" | "#>" | "@>" | "<@" | "?|" | "?&" | "||" | "!=" | "<>" | ">=" | "<="
+            );
+            if is_pg_operator {
+                if !current_word.is_empty() {
+                    spans.push(create_word_span(&current_word, theme, base_style));
+                    current_word.clear();
+                }
+                // Check for 3-char operators: ->>, #>>
+                if i + 2 < len {
+                    let three_char: String = chars[i..i + 3].iter().collect();
+                    if matches!(three_char.as_str(), "->>" | "#>>") {
+                        spans.push(Span::styled(
+                            three_char,
+                            base_style.fg(theme.syntax_operator),
+                        ));
+                        i += 3;
+                        continue;
+                    }
+                }
+                spans.push(Span::styled(two_char, base_style.fg(theme.syntax_operator)));
+                i += 2;
+                continue;
+            }
         }
 
         // Handle word boundaries
@@ -428,19 +548,24 @@ fn highlight_sql_line<'a>(
             let style = match c {
                 '(' | ')' | '[' | ']' | '{' | '}' => base_style.fg(theme.text_primary),
                 ',' | ';' => base_style.fg(theme.text_secondary),
-                '=' | '>' | '<' | '!' | '+' | '-' | '*' | '/' | '%' => {
-                    base_style.fg(theme.syntax_operator)
-                }
+                '=' | '>' | '<' | '!' | '+' | '-' | '*' | '/' | '%' | '~' | '&' | '|' | '^'
+                | '#' | '@' | '?' => base_style.fg(theme.syntax_operator),
+                ':' => base_style.fg(theme.syntax_operator),
+                '.' => base_style.fg(theme.text_muted),
                 _ => base_style.fg(theme.text_primary),
             };
             spans.push(Span::styled(c.to_string(), style));
         }
+
+        i += 1;
     }
 
     // Handle remaining word
     if !current_word.is_empty() {
         let style = if in_string {
             Style::default().fg(theme.syntax_string)
+        } else if in_block_comment {
+            Style::default().fg(theme.syntax_comment)
         } else {
             Style::default()
         };
@@ -455,9 +580,11 @@ fn create_word_span<'a>(word: &str, theme: &Theme, base_style: Style) -> Span<'a
         base_style
             .fg(theme.syntax_keyword)
             .add_modifier(Modifier::BOLD)
+    } else if is_sql_function(word) {
+        base_style.fg(theme.syntax_function)
     } else if is_sql_type(word) {
         base_style.fg(theme.syntax_type)
-    } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') {
+    } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') && !word.is_empty() {
         base_style.fg(theme.syntax_number)
     } else {
         base_style.fg(theme.text_primary)
@@ -476,9 +603,18 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     };
     let result_total = app.results.len();
 
-    // Build title with execution time and row count
+    // Build title with execution time, row count, and cell position
     let title = if let Some(result) = app.results.get(app.current_result) {
         let time_ms = result.execution_time.as_secs_f64() * 1000.0;
+        let position = if !result.columns.is_empty() && !result.rows.is_empty() {
+            format!(
+                " [R{}/C{}]",
+                app.result_selected_row + 1,
+                app.result_selected_col + 1
+            )
+        } else {
+            String::new()
+        };
         if result.error.is_some() {
             format!(
                 " Results ({}/{}) - ERROR ({:.2}ms) ",
@@ -491,8 +627,13 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             )
         } else {
             format!(
-                " Results ({}/{}) - {} rows ({:.2}ms) ",
-                result_index, result_total, result.row_count, time_ms
+                " Results ({}/{}) - {} rows x {} cols ({:.2}ms){} ",
+                result_index,
+                result_total,
+                result.row_count,
+                result.columns.len(),
+                time_ms,
+                position
             )
         }
     } else {
@@ -1079,10 +1220,13 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   (Sidebar → Editor → Results → ...)",
         "",
         " EDITOR",
-        "   F5/Ctrl+Enter  Execute query",
+        "   F5/Ctrl+Enter  Execute query at cursor",
         "   Ctrl+L         Clear editor",
         "   Ctrl+↑/↓       Navigate history",
+        "   Ctrl+Shift+↑/↓ Resize editor/results",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
+        "   Ctrl+Z         Undo",
+        "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Tab            Insert spaces",
         "",
@@ -1092,7 +1236,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   ↑/↓            Navigate",
         "",
         " RESULTS",
+        "   Tab/Shift+Tab  Next/Prev column",
         "   Arrow keys     Navigate cells",
+        "   Esc            Back to editor",
         "   Ctrl+C         Copy cell value",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
