@@ -693,12 +693,21 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         })
         .collect();
 
-    // Create header
+    // Create header with sort indicators
     let header_cells: Vec<Cell> = result
         .columns
         .iter()
         .enumerate()
         .map(|(i, col)| {
+            let sort_indicator = if app.result_sort_column == Some(i) {
+                if app.result_sort_ascending {
+                    " \u{25B2}" // ▲
+                } else {
+                    " \u{25BC}" // ▼
+                }
+            } else {
+                ""
+            };
             let style = if i == app.result_selected_col {
                 Style::default()
                     .fg(theme.text_accent)
@@ -708,7 +717,7 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD)
             };
-            Cell::from(col.name.clone()).style(style)
+            Cell::from(format!("{}{}", col.name, sort_indicator)).style(style)
         })
         .collect();
 
@@ -716,17 +725,20 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         .style(Style::default().bg(theme.bg_secondary))
         .height(1);
 
-    // Create rows
+    // Create rows using sorted indices when active
     let visible_height = area.height.saturating_sub(2) as usize;
     let start_row = app.result_scroll_y;
+    let has_sort = !app.result_sort_indices.is_empty();
 
-    let rows: Vec<Row> = result
-        .rows
-        .iter()
-        .enumerate()
-        .skip(start_row)
-        .take(visible_height)
-        .map(|(row_idx, row)| {
+    let rows: Vec<Row> = (start_row..result.rows.len().min(start_row + visible_height))
+        .map(|display_idx| {
+            let actual_idx = if has_sort {
+                app.sorted_row_index(display_idx)
+            } else {
+                display_idx
+            };
+            let row = &result.rows[actual_idx];
+
             let cells: Vec<Cell> = row
                 .iter()
                 .enumerate()
@@ -734,7 +746,7 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
                     let display = cell.display();
                     let truncated: String = display.chars().take(40).collect();
 
-                    let style = if row_idx == app.result_selected_row {
+                    let style = if display_idx == app.result_selected_row {
                         if col_idx == app.result_selected_col {
                             Style::default()
                                 .bg(theme.bg_highlight)
@@ -1317,6 +1329,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Arrow keys     Navigate cells",
         "   Esc            Back to editor",
         "   Ctrl+C         Copy cell value",
+        "   s              Sort by column",
         "   Ctrl+S         Export results",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
