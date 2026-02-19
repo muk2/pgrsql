@@ -110,25 +110,31 @@ async fn run_app(
         terminal.draw(|f| ui::draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Only handle key press events (ignore release/repeat)
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
+            match event::read()? {
+                Event::Key(key) => {
+                    // Only handle key press events (ignore release/repeat)
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
 
-                // Global quit: Ctrl+Q or Ctrl+D
-                if (key.code == KeyCode::Char('q') || key.code == KeyCode::Char('d'))
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    return Ok(());
-                }
+                    // Global quit: Ctrl+Q or Ctrl+D
+                    if (key.code == KeyCode::Char('q') || key.code == KeyCode::Char('d'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        return Ok(());
+                    }
 
-                // Handle input based on current focus
-                app.handle_input(key).await?;
+                    // Handle input based on current focus
+                    app.handle_input(key).await?;
 
-                if app.should_quit {
-                    return Ok(());
+                    if app.should_quit {
+                        return Ok(());
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse(mouse.kind, mouse.column, mouse.row);
+                }
+                _ => {}
             }
         }
 

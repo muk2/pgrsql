@@ -11,7 +11,17 @@ use crate::db::{
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::ui::Theme;
 
+use ratatui::layout::Rect;
+
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LayoutRects {
+    pub sidebar: Rect,
+    pub editor: Rect,
+    pub results: Rect,
+    pub status_bar: Rect,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Focus {
@@ -125,6 +135,9 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Layout rects (updated each draw for mouse support)
+    pub layout: LayoutRects,
 
     // Export
     pub export_selected: usize,
@@ -288,6 +301,7 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            layout: LayoutRects::default(),
             export_selected: 0,
             pending_connection: None,
         }
@@ -1448,6 +1462,109 @@ impl App {
 
         Ok(())
     }
+
+    pub fn handle_mouse(&mut self, kind: crossterm::event::MouseEventKind, column: u16, row: u16) {
+        use crossterm::event::MouseEventKind;
+
+        // Don't handle mouse when in dialog/help overlays
+        if self.connection_dialog.active || self.show_help {
+            return;
+        }
+
+        match kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                self.handle_mouse_click(column, row);
+            }
+            MouseEventKind::ScrollUp => {
+                self.handle_mouse_scroll(column, row, -3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.handle_mouse_scroll(column, row, 3);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_click(&mut self, column: u16, row: u16) {
+        let layout = self.layout;
+
+        if rect_contains(layout.sidebar, column, row) {
+            self.focus = Focus::Sidebar;
+            // Map click to sidebar item (subtract border + tab area)
+            let local_y = row.saturating_sub(layout.sidebar.y + 3) as usize;
+            let idx = local_y + self.sidebar_scroll;
+            let max = match self.sidebar_tab {
+                SidebarTab::Databases => self.databases.len(),
+                SidebarTab::Tables => self.tables.len() + self.schemas.len(),
+                SidebarTab::History => self.query_history.entries().len(),
+            };
+            if idx < max {
+                self.sidebar_selected = idx;
+            }
+        } else if rect_contains(layout.editor, column, row) {
+            self.focus = Focus::Editor;
+            // Map click to editor position (inside border)
+            let inner_x = column.saturating_sub(layout.editor.x + 1) as usize;
+            let inner_y = row.saturating_sub(layout.editor.y + 1) as usize;
+            let target_y = inner_y + self.editor.scroll_offset;
+            if target_y < self.editor.lines.len() {
+                self.editor.cursor_y = target_y;
+                self.editor.cursor_x = inner_x.min(self.editor.lines[target_y].len());
+                self.editor.clear_selection();
+            }
+        } else if rect_contains(layout.results, column, row) {
+            self.focus = Focus::Results;
+            // Map click to result row (inside border + header)
+            let inner_y = row.saturating_sub(layout.results.y + 2) as usize;
+            let target_row = inner_y + self.result_scroll_y;
+            if let Some(result) = self.results.get(self.current_result) {
+                if target_row < result.rows.len() {
+                    self.result_selected_row = target_row;
+                }
+            }
+        }
+    }
+
+    fn handle_mouse_scroll(&mut self, column: u16, row: u16, delta: i32) {
+        let layout = self.layout;
+
+        if rect_contains(layout.editor, column, row) {
+            if delta < 0 {
+                self.editor.scroll_offset =
+                    self.editor.scroll_offset.saturating_sub((-delta) as usize);
+            } else {
+                let max_scroll = self.editor.lines.len().saturating_sub(1);
+                self.editor.scroll_offset =
+                    (self.editor.scroll_offset + delta as usize).min(max_scroll);
+            }
+        } else if rect_contains(layout.results, column, row) {
+            if let Some(result) = self.results.get(self.current_result) {
+                if delta < 0 {
+                    self.result_selected_row =
+                        self.result_selected_row.saturating_sub((-delta) as usize);
+                } else {
+                    self.result_selected_row = (self.result_selected_row + delta as usize)
+                        .min(result.rows.len().saturating_sub(1));
+                }
+            }
+        } else if rect_contains(layout.sidebar, column, row) {
+            let max = match self.sidebar_tab {
+                SidebarTab::Databases => self.databases.len(),
+                SidebarTab::Tables => self.tables.len() + self.schemas.len(),
+                SidebarTab::History => self.query_history.entries().len(),
+            };
+            if delta < 0 {
+                self.sidebar_selected = self.sidebar_selected.saturating_sub((-delta) as usize);
+            } else {
+                self.sidebar_selected =
+                    (self.sidebar_selected + delta as usize).min(max.saturating_sub(1));
+            }
+        }
+    }
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
 fn dialog_field_len(config: &ConnectionConfig, field_index: usize) -> usize {
