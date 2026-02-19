@@ -337,9 +337,9 @@ impl App {
         // Global shortcuts
         match (key.code, key.modifiers) {
             // Ctrl+Shift+T: Toggle theme (works in all contexts except connection dialog text input)
-            (KeyCode::Char('T'), m)
-                if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-            {
+            // Note: most terminals report Ctrl+Shift+T as Char('T') with only CONTROL;
+            // the SHIFT modifier is implicit in the uppercase letter.
+            (KeyCode::Char('T'), m) if m.contains(KeyModifiers::CONTROL) => {
                 self.toggle_theme();
                 return Ok(());
             }
