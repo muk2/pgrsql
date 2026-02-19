@@ -1234,6 +1234,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   1/2/3          Switch tabs",
         "   Enter          Select item",
         "   ↑/↓            Navigate",
+        "   Ctrl+I         Inspect table (DDL)",
         "",
         " RESULTS",
         "   Tab/Shift+Tab  Next/Prev column",
