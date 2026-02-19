@@ -1,6 +1,40 @@
 use arboard::Clipboard;
 use std::cmp::min;
 
+#[derive(Debug, Clone, PartialEq)]
+enum UndoActionType {
+    Insert,
+    Delete,
+    Newline,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+struct BufferSnapshot {
+    lines: Vec<String>,
+    cursor_x: usize,
+    cursor_y: usize,
+}
+
+#[derive(Debug, Clone)]
+struct UndoHistory {
+    undo_stack: Vec<BufferSnapshot>,
+    redo_stack: Vec<BufferSnapshot>,
+    max_depth: usize,
+    last_action: Option<UndoActionType>,
+}
+
+impl UndoHistory {
+    fn new() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            max_depth: 500,
+            last_action: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TextBuffer {
     pub lines: Vec<String>,
@@ -9,6 +43,7 @@ pub struct TextBuffer {
     pub selection_start: Option<(usize, usize)>,
     pub scroll_offset: usize,
     pub modified: bool,
+    undo_history: UndoHistory,
 }
 
 impl Default for TextBuffer {
@@ -27,6 +62,7 @@ impl TextBuffer {
             selection_start: None,
             scroll_offset: 0,
             modified: false,
+            undo_history: UndoHistory::new(),
         }
     }
 
@@ -43,6 +79,76 @@ impl TextBuffer {
             selection_start: None,
             scroll_offset: 0,
             modified: false,
+            undo_history: UndoHistory::new(),
+        }
+    }
+
+    fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            lines: self.lines.clone(),
+            cursor_x: self.cursor_x,
+            cursor_y: self.cursor_y,
+        }
+    }
+
+    fn save_undo(&mut self, action_type: UndoActionType) {
+        let should_save = match (&self.undo_history.last_action, &action_type) {
+            (Some(last), current) if last == current && *current == UndoActionType::Insert => false,
+            (Some(last), current) if last == current && *current == UndoActionType::Delete => false,
+            _ => true,
+        };
+
+        if should_save {
+            let snap = self.snapshot();
+            self.undo_history.undo_stack.push(snap);
+            if self.undo_history.undo_stack.len() > self.undo_history.max_depth {
+                self.undo_history.undo_stack.remove(0);
+            }
+        }
+
+        self.undo_history.redo_stack.clear();
+        self.undo_history.last_action = Some(action_type);
+    }
+
+    fn save_undo_forced(&mut self) {
+        let snap = self.snapshot();
+        self.undo_history.undo_stack.push(snap);
+        if self.undo_history.undo_stack.len() > self.undo_history.max_depth {
+            self.undo_history.undo_stack.remove(0);
+        }
+        self.undo_history.redo_stack.clear();
+        self.undo_history.last_action = Some(UndoActionType::Other);
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(snap) = self.undo_history.undo_stack.pop() {
+            let current = self.snapshot();
+            self.undo_history.redo_stack.push(current);
+            self.lines = snap.lines;
+            self.cursor_x = snap.cursor_x;
+            self.cursor_y = snap.cursor_y;
+            self.selection_start = None;
+            self.undo_history.last_action = None;
+            self.modified = !self.undo_history.undo_stack.is_empty();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(snap) = self.undo_history.redo_stack.pop() {
+            let current = self.snapshot();
+            self.undo_history.undo_stack.push(current);
+            self.lines = snap.lines;
+            self.cursor_x = snap.cursor_x;
+            self.cursor_y = snap.cursor_y;
+            self.selection_start = None;
+            self.undo_history.last_action = None;
+            self.modified = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -59,11 +165,16 @@ impl TextBuffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.delete_selection();
+        if self.has_selection() {
+            self.save_undo_forced();
+            self.delete_selection_internal();
+        }
 
         if c == '\n' {
-            self.insert_newline();
+            self.save_undo(UndoActionType::Newline);
+            self.insert_newline_internal();
         } else {
+            self.save_undo(UndoActionType::Insert);
             let cx = self.cursor_x;
             let line = self.current_line_mut();
             if cx >= line.len() {
@@ -77,6 +188,11 @@ impl TextBuffer {
     }
 
     pub fn insert_newline(&mut self) {
+        self.save_undo(UndoActionType::Newline);
+        self.insert_newline_internal();
+    }
+
+    fn insert_newline_internal(&mut self) {
         let cx = self.cursor_x;
         let current_line = self.current_line_mut();
         let remainder = current_line.split_off(cx);
@@ -87,17 +203,32 @@ impl TextBuffer {
     }
 
     pub fn insert_text(&mut self, text: &str) {
+        self.save_undo_forced();
         for c in text.chars() {
-            self.insert_char(c);
+            if c == '\n' {
+                self.insert_newline_internal();
+            } else {
+                let cx = self.cursor_x;
+                let line = self.current_line_mut();
+                if cx >= line.len() {
+                    line.push(c);
+                } else {
+                    line.insert(cx, c);
+                }
+                self.cursor_x += 1;
+            }
         }
+        self.modified = true;
     }
 
     pub fn backspace(&mut self) {
         if self.has_selection() {
-            self.delete_selection();
+            self.save_undo_forced();
+            self.delete_selection_internal();
             return;
         }
 
+        self.save_undo(UndoActionType::Delete);
         if self.cursor_x > 0 {
             let cx = self.cursor_x;
             let line = self.current_line_mut();
@@ -115,10 +246,12 @@ impl TextBuffer {
 
     pub fn delete(&mut self) {
         if self.has_selection() {
-            self.delete_selection();
+            self.save_undo_forced();
+            self.delete_selection_internal();
             return;
         }
 
+        self.save_undo(UndoActionType::Delete);
         let line_len = self.current_line().len();
         if self.cursor_x < line_len {
             let cx = self.cursor_x;
@@ -289,6 +422,15 @@ impl TextBuffer {
     }
 
     pub fn delete_selection(&mut self) -> bool {
+        if self.has_selection() {
+            self.save_undo_forced();
+            self.delete_selection_internal()
+        } else {
+            false
+        }
+    }
+
+    fn delete_selection_internal(&mut self) -> bool {
         if let Some((start, end)) = self.get_selection() {
             if start.1 == end.1 {
                 // Same line
@@ -335,15 +477,31 @@ impl TextBuffer {
 
     pub fn cut(&mut self) -> Option<String> {
         let text = self.copy()?;
-        self.delete_selection();
+        self.save_undo_forced();
+        self.delete_selection_internal();
         Some(text)
     }
 
     pub fn paste(&mut self) {
         if let Ok(mut clipboard) = Clipboard::new() {
             if let Ok(text) = clipboard.get_text() {
-                self.delete_selection();
-                self.insert_text(&text);
+                self.save_undo_forced();
+                self.delete_selection_internal();
+                for c in text.chars() {
+                    if c == '\n' {
+                        self.insert_newline_internal();
+                    } else {
+                        let cx = self.cursor_x;
+                        let line = self.current_line_mut();
+                        if cx >= line.len() {
+                            line.push(c);
+                        } else {
+                            line.insert(cx, c);
+                        }
+                        self.cursor_x += 1;
+                    }
+                }
+                self.modified = true;
             }
         }
     }
@@ -356,6 +514,7 @@ impl TextBuffer {
         self.selection_start = None;
         self.scroll_offset = 0;
         self.modified = false;
+        self.undo_history = UndoHistory::new();
     }
 
     pub fn set_text(&mut self, text: &str) {
@@ -367,6 +526,7 @@ impl TextBuffer {
         self.cursor_y = 0;
         self.selection_start = None;
         self.modified = false;
+        self.undo_history = UndoHistory::new();
     }
 
     // Tab handling
@@ -846,5 +1006,151 @@ mod tests {
         buf.cursor_x = 5;
         buf.insert_char('X');
         assert_eq!(buf.text(), "X");
+    }
+
+    // --- Undo / Redo ---
+
+    #[test]
+    fn test_undo_insert_char() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.insert_char('b');
+        buf.insert_char('c');
+        assert_eq!(buf.text(), "abc");
+        // Consecutive inserts are grouped, so one undo reverts all
+        buf.undo();
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_undo_newline_creates_new_group() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.insert_char('b');
+        buf.insert_newline();
+        buf.insert_char('c');
+        assert_eq!(buf.text(), "ab\nc");
+        // Undo the 'c' (insert group)
+        buf.undo();
+        assert_eq!(buf.text(), "ab\n");
+        // Undo the newline
+        buf.undo();
+        assert_eq!(buf.text(), "ab");
+        // Undo the 'ab' (insert group)
+        buf.undo();
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_redo() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.insert_char('b');
+        assert_eq!(buf.text(), "ab");
+        buf.undo();
+        assert_eq!(buf.text(), "");
+        buf.redo();
+        assert_eq!(buf.text(), "ab");
+    }
+
+    #[test]
+    fn test_redo_cleared_on_new_edit() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.undo();
+        assert_eq!(buf.text(), "");
+        buf.insert_char('b');
+        assert!(!buf.redo()); // redo stack should be cleared
+        assert_eq!(buf.text(), "b");
+    }
+
+    #[test]
+    fn test_undo_backspace() {
+        let mut buf = TextBuffer::from_text("abc");
+        buf.cursor_x = 3;
+        buf.backspace();
+        buf.backspace();
+        assert_eq!(buf.text(), "a");
+        buf.undo();
+        assert_eq!(buf.text(), "abc");
+    }
+
+    #[test]
+    fn test_undo_delete_selection() {
+        let mut buf = TextBuffer::from_text("hello world");
+        buf.cursor_x = 0;
+        buf.start_selection();
+        buf.cursor_x = 5;
+        buf.delete_selection();
+        assert_eq!(buf.text(), " world");
+        buf.undo();
+        assert_eq!(buf.text(), "hello world");
+    }
+
+    #[test]
+    fn test_undo_on_empty_returns_false() {
+        let mut buf = TextBuffer::new();
+        assert!(!buf.undo());
+    }
+
+    #[test]
+    fn test_redo_on_empty_returns_false() {
+        let mut buf = TextBuffer::new();
+        assert!(!buf.redo());
+    }
+
+    #[test]
+    fn test_undo_insert_text() {
+        let mut buf = TextBuffer::new();
+        buf.insert_text("hello\nworld");
+        assert_eq!(buf.text(), "hello\nworld");
+        buf.undo();
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_set_text_clears_undo() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.set_text("new content");
+        assert!(!buf.undo()); // undo stack should be empty
+    }
+
+    #[test]
+    fn test_clear_clears_undo() {
+        let mut buf = TextBuffer::from_text("content");
+        buf.insert_char('x');
+        buf.clear();
+        assert!(!buf.undo()); // undo stack should be empty
+    }
+
+    #[test]
+    fn test_undo_cursor_position_restored() {
+        let mut buf = TextBuffer::new();
+        buf.insert_char('a');
+        buf.insert_char('b');
+        assert_eq!(buf.cursor_x, 2);
+        buf.undo();
+        assert_eq!(buf.cursor_x, 0);
+    }
+
+    #[test]
+    fn test_multiple_undo_redo_cycles() {
+        let mut buf = TextBuffer::new();
+        buf.insert_text("first");
+        buf.insert_newline();
+        buf.insert_text("second");
+        // undo insert "second"
+        buf.undo();
+        assert_eq!(buf.text(), "first\n");
+        // undo newline
+        buf.undo();
+        assert_eq!(buf.text(), "first");
+        // redo newline
+        buf.redo();
+        assert_eq!(buf.text(), "first\n");
+        // redo insert "second"
+        buf.redo();
+        assert_eq!(buf.text(), "first\nsecond");
     }
 }
