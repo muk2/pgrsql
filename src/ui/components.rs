@@ -774,8 +774,12 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme.text_muted).bg(theme.bg_secondary)
     };
 
-    // Right section: help hints
-    let right_text = "? Help | Ctrl+Q/D Quit ";
+    // Right section: theme indicator + help hints
+    let theme_indicator = match app.theme.name {
+        crate::ui::ThemeName::Dark => "Dark",
+        crate::ui::ThemeName::Light => "Light",
+    };
+    let right_text = format!("{} | ? Help | Ctrl+Q/D Quit ", theme_indicator);
 
     // Calculate padding
     let left_len = left_text.len() as u16;
@@ -1086,6 +1090,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         " GLOBAL",
         "   Ctrl+Q/D       Quit",
         "   Ctrl+C         Connect dialog",
+        "   Ctrl+Shift+T   Toggle theme",
         "   ?              Toggle help",
         "",
         " NAVIGATION",

@@ -1,7 +1,14 @@
 use ratatui::style::{Color, Modifier, Style};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThemeName {
+    Dark,
+    Light,
+}
+
 #[allow(dead_code)]
 pub struct Theme {
+    pub name: ThemeName,
     // Background colors
     pub bg_primary: Color,
     pub bg_secondary: Color,
@@ -43,10 +50,27 @@ impl Default for Theme {
     }
 }
 
+impl ThemeName {
+    pub fn toggle(self) -> Self {
+        match self {
+            ThemeName::Dark => ThemeName::Light,
+            ThemeName::Light => ThemeName::Dark,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThemeName::Dark => "dark",
+            ThemeName::Light => "light",
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl Theme {
     pub fn dark() -> Self {
         Self {
+            name: ThemeName::Dark,
             // Background colors - dark blue-gray palette
             bg_primary: Color::Rgb(24, 26, 33),
             bg_secondary: Color::Rgb(30, 33, 43),
@@ -85,6 +109,7 @@ impl Theme {
 
     pub fn light() -> Self {
         Self {
+            name: ThemeName::Light,
             bg_primary: Color::Rgb(250, 250, 252),
             bg_secondary: Color::Rgb(240, 240, 245),
             bg_tertiary: Color::Rgb(230, 230, 238),
