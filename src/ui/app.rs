@@ -20,6 +20,46 @@ pub enum Focus {
     Results,
     ConnectionDialog,
     Help,
+    ExportPicker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    SqlInsert,
+    Tsv,
+    ClipboardCsv,
+}
+
+pub const EXPORT_FORMATS: &[ExportFormat] = &[
+    ExportFormat::Csv,
+    ExportFormat::Json,
+    ExportFormat::SqlInsert,
+    ExportFormat::Tsv,
+    ExportFormat::ClipboardCsv,
+];
+
+impl ExportFormat {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "CSV (.csv)",
+            ExportFormat::Json => "JSON (.json)",
+            ExportFormat::SqlInsert => "SQL INSERT (.sql)",
+            ExportFormat::Tsv => "TSV (.tsv)",
+            ExportFormat::ClipboardCsv => "Copy to clipboard (CSV)",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::SqlInsert => "sql",
+            ExportFormat::Tsv => "tsv",
+            ExportFormat::ClipboardCsv => "csv",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +125,9 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+
+    // Export
+    pub export_selected: usize,
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
@@ -245,6 +288,7 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            export_selected: 0,
             pending_connection: None,
         }
     }
@@ -329,6 +373,7 @@ impl App {
             Focus::Editor => self.handle_editor_input(key).await,
             Focus::Results => self.handle_results_input(key).await,
             Focus::Help => self.handle_help_input(key).await,
+            Focus::ExportPicker => self.handle_export_input(key).await,
         }
     }
 
@@ -846,6 +891,12 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.copy_selected_cell();
             }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.results.is_empty() {
+                    self.export_selected = 0;
+                    self.focus = Focus::ExportPicker;
+                }
+            }
             KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.current_result > 0 {
                     self.current_result -= 1;
@@ -890,6 +941,84 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    async fn handle_export_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.focus = Focus::Results;
+            }
+            KeyCode::Up => {
+                if self.export_selected > 0 {
+                    self.export_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.export_selected < EXPORT_FORMATS.len() - 1 {
+                    self.export_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let format = EXPORT_FORMATS[self.export_selected];
+                self.perform_export(format);
+                self.focus = Focus::Results;
+            }
+            KeyCode::Char(c @ '1'..='5') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < EXPORT_FORMATS.len() {
+                    let format = EXPORT_FORMATS[idx];
+                    self.perform_export(format);
+                    self.focus = Focus::Results;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn perform_export(&mut self, format: ExportFormat) {
+        let result = match self.results.get(self.current_result) {
+            Some(r) => r,
+            None => {
+                self.set_status("No results to export".to_string(), StatusType::Warning);
+                return;
+            }
+        };
+
+        let content = match format {
+            ExportFormat::Csv => crate::export::to_csv(result),
+            ExportFormat::Json => crate::export::to_json(result),
+            ExportFormat::SqlInsert => crate::export::to_sql_insert(result, "results"),
+            ExportFormat::Tsv => crate::export::to_tsv(result),
+            ExportFormat::ClipboardCsv => {
+                let csv = crate::export::to_csv(result);
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(&csv);
+                    self.set_status(
+                        format!("Copied {} rows to clipboard", result.row_count),
+                        StatusType::Success,
+                    );
+                } else {
+                    self.set_status("Failed to access clipboard".to_string(), StatusType::Error);
+                }
+                return;
+            }
+        };
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("pgrsql_export_{}.{}", timestamp, format.extension());
+
+        match std::fs::write(&filename, &content) {
+            Ok(()) => {
+                self.set_status(
+                    format!("Exported {} rows to {}", result.row_count, filename),
+                    StatusType::Success,
+                );
+            }
+            Err(e) => {
+                self.set_status(format!("Export failed: {}", e), StatusType::Error);
+            }
+        }
     }
 
     async fn handle_sidebar_select(&mut self) -> Result<()> {
