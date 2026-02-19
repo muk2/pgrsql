@@ -8,8 +8,8 @@ use ratatui::{
 
 use crate::db::SslMode;
 use crate::ui::{
-    is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
-    EXPORT_FORMATS, SPINNER_FRAMES,
+    is_sql_function, is_sql_keyword, is_sql_type, App, FindReplaceField, Focus, SidebarTab,
+    StatusType, Theme, EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -316,11 +316,46 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         area,
     );
 
+    // Calculate find/replace bar height
+    let find_bar_height = if app.find_replace.active {
+        if app.find_replace.show_replace {
+            2u16
+        } else {
+            1u16
+        }
+    } else {
+        0u16
+    };
+
+    // Split inner area for find bar and editor content
+    let (find_area, editor_content_area) = if find_bar_height > 0 && inner_area.height > find_bar_height
+    {
+        (
+            Rect::new(inner_area.x, inner_area.y, inner_area.width, find_bar_height),
+            Rect::new(
+                inner_area.x,
+                inner_area.y + find_bar_height,
+                inner_area.width,
+                inner_area.height - find_bar_height,
+            ),
+        )
+    } else {
+        (
+            Rect::new(inner_area.x, inner_area.y, inner_area.width, 0),
+            inner_area,
+        )
+    };
+
+    // Draw find/replace bar
+    if app.find_replace.active && find_area.height > 0 {
+        draw_find_bar(frame, app, find_area);
+    }
+
     // Determine active query range for visual highlighting
     let query_range = app.get_current_query_line_range();
 
     // Syntax highlight and render editor content
-    let visible_height = inner_area.height as usize;
+    let visible_height = editor_content_area.height as usize;
     let lines: Vec<Line> = app
         .editor
         .lines
@@ -333,19 +368,112 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
             let in_active_query = query_range
                 .map(|(start, end)| actual_line >= start && actual_line <= end)
                 .unwrap_or(false);
-            highlight_sql_line(line_text, theme, actual_line, &app.editor, in_active_query)
+            highlight_sql_line(
+                line_text,
+                theme,
+                actual_line,
+                &app.editor,
+                in_active_query,
+                &app.find_replace,
+            )
         })
         .collect();
 
     let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner_area);
+    frame.render_widget(paragraph, editor_content_area);
 
-    // Show cursor (offset by 2 for gutter prefix)
-    if focused {
-        let cursor_x = inner_area.x + 2 + app.editor.cursor_x as u16;
-        let cursor_y = inner_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
-        if cursor_y < inner_area.y + inner_area.height {
+    // Show cursor
+    if focused && !app.find_replace.active {
+        let cursor_x = editor_content_area.x + 2 + app.editor.cursor_x as u16;
+        let cursor_y = editor_content_area.y
+            + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
+        if cursor_y < editor_content_area.y + editor_content_area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
+        }
+    }
+}
+
+fn draw_find_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let fr = &app.find_replace;
+
+    let match_info = if fr.search_text.is_empty() {
+        String::new()
+    } else if fr.matches.is_empty() {
+        " (no matches)".to_string()
+    } else {
+        format!(" ({}/{})", fr.current_match + 1, fr.matches.len())
+    };
+
+    let case_indicator = if fr.case_sensitive { " [Aa]" } else { " [.*]" };
+
+    // Search line
+    let search_label = " Find: ";
+    let search_line = Line::from(vec![
+        Span::styled(
+            search_label,
+            Style::default()
+                .fg(theme.text_secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            fr.search_text.clone(),
+            if matches!(fr.focused_field, FindReplaceField::Search) {
+                Style::default().fg(theme.text_accent)
+            } else {
+                Style::default().fg(theme.text_primary)
+            },
+        ),
+        Span::styled(match_info, Style::default().fg(theme.text_muted)),
+        Span::styled(case_indicator, Style::default().fg(theme.text_muted)),
+    ]);
+
+    let search_area = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(search_line).style(Style::default().bg(theme.bg_secondary)),
+        search_area,
+    );
+
+    // Cursor in search field
+    if matches!(fr.focused_field, FindReplaceField::Search) {
+        let cursor_x = area.x + search_label.len() as u16 + fr.search_cursor as u16;
+        if cursor_x < area.x + area.width {
+            frame.set_cursor_position((cursor_x, area.y));
+        }
+    }
+
+    // Replace line (if visible)
+    if fr.show_replace && area.height >= 2 {
+        let replace_label = " Replace: ";
+        let replace_line = Line::from(vec![
+            Span::styled(
+                replace_label,
+                Style::default()
+                    .fg(theme.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                fr.replace_text.clone(),
+                if matches!(fr.focused_field, FindReplaceField::Replace) {
+                    Style::default().fg(theme.text_accent)
+                } else {
+                    Style::default().fg(theme.text_primary)
+                },
+            ),
+        ]);
+
+        let replace_area = Rect::new(area.x, area.y + 1, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(replace_line).style(Style::default().bg(theme.bg_secondary)),
+            replace_area,
+        );
+
+        // Cursor in replace field
+        if matches!(fr.focused_field, FindReplaceField::Replace) {
+            let cursor_x = area.x + replace_label.len() as u16 + fr.replace_cursor as u16;
+            if cursor_x < area.x + area.width {
+                frame.set_cursor_position((cursor_x, area.y + 1));
+            }
         }
     }
 }
@@ -377,7 +505,20 @@ fn highlight_sql_line<'a>(
     line_number: usize,
     editor: &crate::editor::TextBuffer,
     in_active_query: bool,
+    find_state: &crate::ui::FindReplaceState,
 ) -> Line<'a> {
+    // Collect match ranges for this line for highlighting
+    let match_ranges: Vec<(usize, usize, bool)> = if find_state.active && !find_state.search_text.is_empty() {
+        find_state
+            .matches
+            .iter()
+            .enumerate()
+            .filter(|(_, &(l, _, _))| l == line_number)
+            .map(|(i, &(_, start, end))| (start, end, i == find_state.current_match))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut spans: Vec<Span> = Vec::new();
     let mut current_word = String::new();
     let mut in_string = false;
@@ -421,8 +562,19 @@ fn highlight_sql_line<'a>(
             false
         };
 
+        // Check if byte_idx falls inside a find match
+        let find_match = match_ranges
+            .iter()
+            .find(|&&(start, end, _)| byte_idx >= start && byte_idx < end);
+
         let base_style = if is_selected {
             Style::default().bg(theme.selection)
+        } else if let Some(&&(_, _, is_current)) = find_match.as_ref() {
+            if is_current {
+                Style::default().bg(theme.warning).fg(theme.bg_primary)
+            } else {
+                Style::default().bg(theme.info).fg(theme.bg_primary)
+            }
         } else {
             Style::default()
         };
@@ -1304,6 +1456,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Z         Undo",
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
+        "   Ctrl+F         Find",
+        "   Ctrl+H         Find & Replace",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
