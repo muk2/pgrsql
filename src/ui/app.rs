@@ -757,6 +757,10 @@ impl App {
             KeyCode::Char('y') if ctrl => {
                 self.editor.redo();
             }
+            KeyCode::Char('f') if ctrl && shift => {
+                // Format SQL
+                self.format_editor_sql();
+            }
             KeyCode::Char('l') if ctrl => {
                 // Clear editor
                 self.editor.clear();
@@ -1508,6 +1512,28 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn format_editor_sql(&mut self) {
+        let text = self.editor.text();
+        if text.trim().is_empty() {
+            return;
+        }
+
+        match crate::ast::parse_sql(&text) {
+            Ok(queries) => {
+                let formatted: Vec<String> = queries.iter().map(crate::ast::format_sql).collect();
+                let result = formatted.join(";\n\n");
+                self.editor.set_text(&result);
+                self.set_status("SQL formatted".to_string(), StatusType::Success);
+            }
+            Err(e) => {
+                self.set_status(
+                    format!("Format failed: {}", e),
+                    StatusType::Error,
+                );
+            }
+        }
     }
 
     fn copy_selected_cell(&mut self) {
