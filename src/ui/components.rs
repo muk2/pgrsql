@@ -9,8 +9,7 @@ use ratatui::{
 use crate::db::SslMode;
 use crate::ui::{
     is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
-    EXPORT_FORMATS,
-    SPINNER_FRAMES,
+    EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
