@@ -682,8 +682,14 @@ impl App {
             KeyCode::Char('a') if ctrl => {
                 self.editor.select_all();
             }
+            KeyCode::Char('z') if ctrl && shift => {
+                self.editor.redo();
+            }
             KeyCode::Char('z') if ctrl => {
-                // Undo (not implemented yet)
+                self.editor.undo();
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.editor.redo();
             }
             KeyCode::Char('l') if ctrl => {
                 // Clear editor
