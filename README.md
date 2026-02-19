@@ -12,6 +12,8 @@ A beautiful, fast TUI SQL editor for PostgreSQL written in Rust.
 - **Query Results Table**: Scrollable, navigable results with cell selection
 - **Query History**: Persistent history with search capability
 - **Connection Management**: Save and manage multiple PostgreSQL connections
+- **Table Inspector**: View table structure, columns, indexes, and DDL without writing queries
+- **Export Results**: Export query results to CSV, JSON, SQL INSERT, or TSV
 - **Keyboard-First Design**: Efficient navigation without leaving the keyboard
 - **Dark Theme**: Easy on the eyes for long coding sessions
 
@@ -135,6 +137,7 @@ cargo install pgrsql
 | `1` / `2` / `3` | Switch sidebar tab (Databases / Tables / History) |
 | `Up/Down` | Navigate items |
 | `Enter` | Select/expand item |
+| `Ctrl+I` | Open Table Inspector (when a table is selected) |
 
 #### Results
 | Key | Action |
@@ -144,6 +147,28 @@ cargo install pgrsql
 | `Ctrl+[` / `Ctrl+]` | Previous / Next result set |
 | `PageUp/PageDown` | Scroll results |
 | `Home/End` | Jump to first/last column |
+| `Ctrl+S` | Export results (opens format picker) |
+
+#### Table Inspector
+| Key | Action |
+|-----|--------|
+| `D` | Toggle between Structure and DDL views |
+| `Ctrl+C` | Copy DDL to clipboard (in DDL view) |
+| `Up/Down` | Scroll content |
+| `PageUp/PageDown` | Scroll by 10 lines |
+| `Esc` or `q` | Close inspector |
+
+### Table Inspector
+
+The Table Inspector lets you view table metadata without writing SQL queries.
+
+1. Switch to the **Tables** tab (`2`) in the sidebar
+2. Expand a schema and select a table
+3. Press `Ctrl+I` to open the inspector
+
+**Structure View** (default): Shows columns with their data types, nullability, primary key indicators, and default values. Also displays indexes with their columns and uniqueness.
+
+**DDL View** (press `D`): Shows the full `CREATE TABLE` statement including all column definitions, constraints, and indexes. Press `Ctrl+C` to copy the DDL to your clipboard.
 
 ### Working with Multiple Databases
 
