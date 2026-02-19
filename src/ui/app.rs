@@ -38,19 +38,16 @@ pub enum TreeNode {
     Column(ColumnDetails),
 }
 
+/// Per-tab state: each tab has its own editor, connection, and results.
 #[allow(dead_code)]
-pub struct App {
-    pub theme: Theme,
-    pub focus: Focus,
-    pub should_quit: bool,
+pub struct EditorTab {
+    pub label: String,
 
     // Connection
     pub connection: ConnectionManager,
-    pub connection_dialog: ConnectionDialogState,
 
     // Sidebar
     pub sidebar_tab: SidebarTab,
-    pub sidebar_width: u16,
     pub databases: Vec<DatabaseInfo>,
     pub schemas: Vec<SchemaInfo>,
     pub tables: Vec<TableInfo>,
@@ -72,6 +69,68 @@ pub struct App {
     pub result_selected_row: usize,
     pub result_selected_col: usize,
 
+    // Async connection task
+    pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
+}
+
+impl EditorTab {
+    pub fn new() -> Self {
+        let query_history = QueryHistory::load().unwrap_or_default();
+        Self {
+            label: "New tab".to_string(),
+            connection: ConnectionManager::new(),
+            sidebar_tab: SidebarTab::Tables,
+            databases: Vec::new(),
+            schemas: Vec::new(),
+            tables: Vec::new(),
+            selected_table_columns: Vec::new(),
+            sidebar_selected: 0,
+            sidebar_scroll: 0,
+            expanded_schemas: vec!["public".to_string()],
+            expanded_tables: Vec::new(),
+            editor: TextBuffer::new(),
+            query_history,
+            results: Vec::new(),
+            current_result: 0,
+            result_scroll_x: 0,
+            result_scroll_y: 0,
+            result_selected_row: 0,
+            result_selected_col: 0,
+            pending_connection: None,
+        }
+    }
+
+    /// Display name for the tab bar
+    pub fn display_name(&self) -> String {
+        if self.connection.is_connected() {
+            let db = &self.connection.current_database;
+            if db.is_empty() {
+                self.connection.config.name.clone()
+            } else {
+                db.clone()
+            }
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct App {
+    pub theme: Theme,
+    pub focus: Focus,
+    pub should_quit: bool,
+
+    // Tabs
+    pub tabs: Vec<EditorTab>,
+    pub active_tab: usize,
+
+    // Connection dialog (shared)
+    pub connection_dialog: ConnectionDialogState,
+
+    // Sidebar width (shared across tabs)
+    pub sidebar_width: u16,
+
     // Toasts
     pub toasts: Vec<Toast>,
 
@@ -82,9 +141,6 @@ pub struct App {
 
     // Help
     pub show_help: bool,
-
-    // Async connection task
-    pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -169,7 +225,6 @@ impl Default for ConnectionDialogState {
 
 impl App {
     pub fn new() -> Self {
-        let query_history = QueryHistory::load().unwrap_or_default();
         let saved_connections = ConnectionManager::load_saved_connections().unwrap_or_default();
 
         // Try to auto-populate last used connection
@@ -198,12 +253,16 @@ impl App {
             initial_config.password.len(),
         ];
 
+        let first_tab = EditorTab::new();
+
         Self {
             theme: Theme::dark(),
             focus: Focus::ConnectionDialog,
             should_quit: false,
 
-            connection: ConnectionManager::new(),
+            tabs: vec![first_tab],
+            active_tab: 0,
+
             connection_dialog: ConnectionDialogState {
                 active: true,
                 config: initial_config,
@@ -214,33 +273,68 @@ impl App {
                 status_message: None,
             },
 
-            sidebar_tab: SidebarTab::Tables,
             sidebar_width: 35,
-            databases: Vec::new(),
-            schemas: Vec::new(),
-            tables: Vec::new(),
-            selected_table_columns: Vec::new(),
-            sidebar_selected: 0,
-            sidebar_scroll: 0,
-            expanded_schemas: vec!["public".to_string()],
-            expanded_tables: Vec::new(),
-
-            editor: TextBuffer::new(),
-            query_history,
-
-            results: Vec::new(),
-            current_result: 0,
-            result_scroll_x: 0,
-            result_scroll_y: 0,
-            result_selected_row: 0,
-            result_selected_col: 0,
 
             toasts: Vec::new(),
             is_loading: false,
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
-            pending_connection: None,
+        }
+    }
+
+    /// Get a reference to the active tab
+    pub fn tab(&self) -> &EditorTab {
+        &self.tabs[self.active_tab]
+    }
+
+    /// Get a mutable reference to the active tab
+    pub fn tab_mut(&mut self) -> &mut EditorTab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    /// Create a new tab and switch to it
+    pub fn new_tab(&mut self) {
+        let tab = EditorTab::new();
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        // Open connection dialog for new tab
+        self.connection_dialog.active = true;
+        self.focus = Focus::ConnectionDialog;
+        self.set_status("New tab created".to_string(), StatusType::Info);
+    }
+
+    /// Close the active tab
+    pub fn close_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            // Last tab: replace with a fresh one
+            self.tabs[0] = EditorTab::new();
+            self.active_tab = 0;
+            self.connection_dialog.active = true;
+            self.focus = Focus::ConnectionDialog;
+            return;
+        }
+        self.tabs.remove(self.active_tab);
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+    }
+
+    /// Switch to next tab
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    /// Switch to previous tab
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
         }
     }
 
@@ -261,8 +355,8 @@ impl App {
         }
 
         // Auto-connect blocks since the UI isn't running yet
-        match self.connection.connect(config.clone()).await {
-            Ok(()) if self.connection.is_connected() => {
+        match self.tab_mut().connection.connect(config.clone()).await {
+            Ok(()) if self.tab().connection.is_connected() => {
                 self.connection_dialog.active = false;
                 self.focus = Focus::Editor;
                 if !self
@@ -315,6 +409,42 @@ impl App {
                 self.focus = Focus::Editor;
                 return Ok(());
             }
+            // Tab management shortcuts (global, not in connection dialog)
+            (KeyCode::Char('t'), m)
+                if m.contains(KeyModifiers::CONTROL) && self.focus != Focus::ConnectionDialog =>
+            {
+                self.new_tab();
+                return Ok(());
+            }
+            (KeyCode::Char('w'), m)
+                if m.contains(KeyModifiers::CONTROL) && self.focus != Focus::ConnectionDialog =>
+            {
+                self.close_tab();
+                return Ok(());
+            }
+            // Alt+1..9 to switch tabs
+            (KeyCode::Char(c @ '1'..='9'), m)
+                if m.contains(KeyModifiers::ALT) && self.focus != Focus::ConnectionDialog =>
+            {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < self.tabs.len() {
+                    self.active_tab = idx;
+                }
+                return Ok(());
+            }
+            // Alt+Right/Left to switch tabs
+            (KeyCode::Right, m)
+                if m.contains(KeyModifiers::ALT) && self.focus != Focus::ConnectionDialog =>
+            {
+                self.next_tab();
+                return Ok(());
+            }
+            (KeyCode::Left, m)
+                if m.contains(KeyModifiers::ALT) && self.focus != Focus::ConnectionDialog =>
+            {
+                self.prev_tab();
+                return Ok(());
+            }
             _ => {}
         }
 
@@ -329,260 +459,274 @@ impl App {
 
     async fn handle_connection_dialog_input(&mut self, key: KeyEvent) -> Result<()> {
         // Ignore input while connection is in progress (except Esc to cancel)
-        if self.pending_connection.is_some() && key.code != KeyCode::Esc {
+        if self.tab().pending_connection.is_some() && key.code != KeyCode::Esc {
             return Ok(());
         }
-
-        let dialog = &mut self.connection_dialog;
 
         match key.code {
             KeyCode::Esc => {
                 // Cancel pending connection if any
-                if let Some((_, handle)) = self.pending_connection.take() {
+                if let Some((_, handle)) = self.tab_mut().pending_connection.take() {
                     handle.abort();
                     self.stop_loading();
                     self.connection_dialog.status_message =
                         Some(("Connection cancelled".to_string(), StatusType::Warning));
                     return Ok(());
                 }
-                if self.connection.is_connected() {
-                    dialog.active = false;
+                if self.tab().connection.is_connected() {
+                    self.connection_dialog.active = false;
+                    self.focus = Focus::Editor;
+                } else if self.tabs.len() > 1 {
+                    // Close this empty tab and switch back
+                    self.close_tab();
                     self.focus = Focus::Editor;
                 } else {
-                    // Quit when not connected
+                    // Quit when not connected and it's the only tab
                     self.should_quit = true;
                 }
             }
             KeyCode::Tab => {
-                dialog.field_index = (dialog.field_index + 1) % 7;
+                self.connection_dialog.field_index = (self.connection_dialog.field_index + 1) % 7;
             }
             KeyCode::BackTab => {
-                dialog.field_index = if dialog.field_index == 0 {
+                self.connection_dialog.field_index = if self.connection_dialog.field_index == 0 {
                     6
                 } else {
-                    dialog.field_index - 1
+                    self.connection_dialog.field_index - 1
                 };
             }
             KeyCode::Up => {
-                if let Some(selected) = dialog.selected_saved {
+                if let Some(selected) = self.connection_dialog.selected_saved {
                     if selected > 0 {
-                        dialog.selected_saved = Some(selected - 1);
+                        self.connection_dialog.selected_saved = Some(selected - 1);
                     }
-                } else if !dialog.saved_connections.is_empty() {
-                    dialog.selected_saved = Some(dialog.saved_connections.len() - 1);
+                } else if !self.connection_dialog.saved_connections.is_empty() {
+                    self.connection_dialog.selected_saved =
+                        Some(self.connection_dialog.saved_connections.len() - 1);
                 }
             }
             KeyCode::Down => {
-                if let Some(selected) = dialog.selected_saved {
-                    if selected < dialog.saved_connections.len() - 1 {
-                        dialog.selected_saved = Some(selected + 1);
+                if let Some(selected) = self.connection_dialog.selected_saved {
+                    if selected < self.connection_dialog.saved_connections.len() - 1 {
+                        self.connection_dialog.selected_saved = Some(selected + 1);
                     }
-                } else if !dialog.saved_connections.is_empty() {
-                    dialog.selected_saved = Some(0);
+                } else if !self.connection_dialog.saved_connections.is_empty() {
+                    self.connection_dialog.selected_saved = Some(0);
                 }
             }
             KeyCode::Left => {
-                if dialog.field_index == 6 {
-                    // Cycle SSL mode backward
-                    dialog.config.ssl_mode = match dialog.config.ssl_mode {
-                        SslMode::Disable => SslMode::VerifyFull,
-                        SslMode::Prefer => SslMode::Disable,
-                        SslMode::Require => SslMode::Prefer,
-                        SslMode::VerifyCa => SslMode::Require,
-                        SslMode::VerifyFull => SslMode::VerifyCa,
-                    };
-                } else if dialog.field_cursors[dialog.field_index] > 0 {
-                    dialog.field_cursors[dialog.field_index] -= 1;
+                if self.connection_dialog.field_index == 6 {
+                    self.connection_dialog.config.ssl_mode =
+                        match self.connection_dialog.config.ssl_mode {
+                            SslMode::Disable => SslMode::VerifyFull,
+                            SslMode::Prefer => SslMode::Disable,
+                            SslMode::Require => SslMode::Prefer,
+                            SslMode::VerifyCa => SslMode::Require,
+                            SslMode::VerifyFull => SslMode::VerifyCa,
+                        };
+                } else {
+                    let fi = self.connection_dialog.field_index;
+                    if self.connection_dialog.field_cursors[fi] > 0 {
+                        self.connection_dialog.field_cursors[fi] -= 1;
+                    }
                 }
             }
             KeyCode::Right => {
-                if dialog.field_index == 6 {
-                    // Cycle SSL mode forward
-                    dialog.config.ssl_mode = match dialog.config.ssl_mode {
-                        SslMode::Disable => SslMode::Prefer,
-                        SslMode::Prefer => SslMode::Require,
-                        SslMode::Require => SslMode::VerifyCa,
-                        SslMode::VerifyCa => SslMode::VerifyFull,
-                        SslMode::VerifyFull => SslMode::Disable,
-                    };
+                if self.connection_dialog.field_index == 6 {
+                    self.connection_dialog.config.ssl_mode =
+                        match self.connection_dialog.config.ssl_mode {
+                            SslMode::Disable => SslMode::Prefer,
+                            SslMode::Prefer => SslMode::Require,
+                            SslMode::Require => SslMode::VerifyCa,
+                            SslMode::VerifyCa => SslMode::VerifyFull,
+                            SslMode::VerifyFull => SslMode::Disable,
+                        };
                 } else {
-                    let len = dialog_field_len(&dialog.config, dialog.field_index);
-                    if dialog.field_cursors[dialog.field_index] < len {
-                        dialog.field_cursors[dialog.field_index] += 1;
+                    let fi = self.connection_dialog.field_index;
+                    let len = dialog_field_len(&self.connection_dialog.config, fi);
+                    if self.connection_dialog.field_cursors[fi] < len {
+                        self.connection_dialog.field_cursors[fi] += 1;
                     }
                 }
             }
             KeyCode::Home => {
-                if dialog.field_index < 6 {
-                    dialog.field_cursors[dialog.field_index] = 0;
+                let fi = self.connection_dialog.field_index;
+                if fi < 6 {
+                    self.connection_dialog.field_cursors[fi] = 0;
                 }
             }
             KeyCode::End => {
-                if dialog.field_index < 6 {
-                    dialog.field_cursors[dialog.field_index] =
-                        dialog_field_len(&dialog.config, dialog.field_index);
+                let fi = self.connection_dialog.field_index;
+                if fi < 6 {
+                    self.connection_dialog.field_cursors[fi] =
+                        dialog_field_len(&self.connection_dialog.config, fi);
                 }
             }
             KeyCode::Enter => {
-                if let Some(idx) = dialog.selected_saved {
-                    if idx < dialog.saved_connections.len() {
-                        dialog.config = dialog.saved_connections[idx].clone();
-                        dialog.field_cursors = [
-                            dialog.config.name.len(),
-                            dialog.config.host.len(),
-                            dialog.config.port.to_string().len(),
-                            dialog.config.database.len(),
-                            dialog.config.username.len(),
-                            dialog.config.password.len(),
+                if let Some(idx) = self.connection_dialog.selected_saved {
+                    if idx < self.connection_dialog.saved_connections.len() {
+                        self.connection_dialog.config =
+                            self.connection_dialog.saved_connections[idx].clone();
+                        self.connection_dialog.field_cursors = [
+                            self.connection_dialog.config.name.len(),
+                            self.connection_dialog.config.host.len(),
+                            self.connection_dialog.config.port.to_string().len(),
+                            self.connection_dialog.config.database.len(),
+                            self.connection_dialog.config.username.len(),
+                            self.connection_dialog.config.password.len(),
                         ];
-                        dialog.field_index = 5; // Auto-focus password field
-                        dialog.selected_saved = None;
+                        self.connection_dialog.field_index = 5;
+                        self.connection_dialog.selected_saved = None;
                     }
                 } else {
                     self.start_connect();
                 }
             }
             KeyCode::Char(c) => {
-                if dialog.field_index == 6 {
+                let fi = self.connection_dialog.field_index;
+                if fi == 6 {
                     return Ok(());
                 }
-                dialog.selected_saved = None;
-                dialog.status_message = None;
-                let cursor = dialog.field_cursors[dialog.field_index];
-                match dialog.field_index {
+                self.connection_dialog.selected_saved = None;
+                self.connection_dialog.status_message = None;
+                let cursor = self.connection_dialog.field_cursors[fi];
+                match fi {
                     0 => {
-                        dialog.config.name.insert(cursor, c);
-                        dialog.field_cursors[0] += 1;
+                        self.connection_dialog.config.name.insert(cursor, c);
+                        self.connection_dialog.field_cursors[0] += 1;
                     }
                     1 => {
-                        dialog.config.host.insert(cursor, c);
-                        dialog.field_cursors[1] += 1;
+                        self.connection_dialog.config.host.insert(cursor, c);
+                        self.connection_dialog.field_cursors[1] += 1;
                     }
                     2 => {
                         if c.is_ascii_digit() {
-                            let mut port_str = dialog.config.port.to_string();
+                            let mut port_str = self.connection_dialog.config.port.to_string();
                             let pos = cursor.min(port_str.len());
                             port_str.insert(pos, c);
                             if let Ok(port) = port_str.parse::<u16>() {
-                                dialog.config.port = port;
-                                let new_len = dialog.config.port.to_string().len();
-                                dialog.field_cursors[2] = (pos + 1).min(new_len);
+                                self.connection_dialog.config.port = port;
+                                let new_len = self.connection_dialog.config.port.to_string().len();
+                                self.connection_dialog.field_cursors[2] = (pos + 1).min(new_len);
                             }
                         }
                     }
                     3 => {
-                        dialog.config.database.insert(cursor, c);
-                        dialog.field_cursors[3] += 1;
+                        self.connection_dialog.config.database.insert(cursor, c);
+                        self.connection_dialog.field_cursors[3] += 1;
                     }
                     4 => {
-                        dialog.config.username.insert(cursor, c);
-                        dialog.field_cursors[4] += 1;
+                        self.connection_dialog.config.username.insert(cursor, c);
+                        self.connection_dialog.field_cursors[4] += 1;
                     }
                     5 => {
-                        dialog.config.password.insert(cursor, c);
-                        dialog.field_cursors[5] += 1;
+                        self.connection_dialog.config.password.insert(cursor, c);
+                        self.connection_dialog.field_cursors[5] += 1;
                     }
                     _ => {}
                 }
             }
             KeyCode::Backspace => {
-                if dialog.field_index == 6 {
+                let fi = self.connection_dialog.field_index;
+                if fi == 6 {
                     return Ok(());
                 }
-                dialog.selected_saved = None;
-                let cursor = dialog.field_cursors[dialog.field_index];
+                self.connection_dialog.selected_saved = None;
+                let cursor = self.connection_dialog.field_cursors[fi];
                 if cursor == 0 {
                     return Ok(());
                 }
-                match dialog.field_index {
+                match fi {
                     0 => {
-                        dialog.config.name.remove(cursor - 1);
-                        dialog.field_cursors[0] -= 1;
+                        self.connection_dialog.config.name.remove(cursor - 1);
+                        self.connection_dialog.field_cursors[0] -= 1;
                     }
                     1 => {
-                        dialog.config.host.remove(cursor - 1);
-                        dialog.field_cursors[1] -= 1;
+                        self.connection_dialog.config.host.remove(cursor - 1);
+                        self.connection_dialog.field_cursors[1] -= 1;
                     }
                     2 => {
-                        let mut port_str = dialog.config.port.to_string();
+                        let mut port_str = self.connection_dialog.config.port.to_string();
                         if cursor <= port_str.len() {
                             port_str.remove(cursor - 1);
-                            dialog.config.port = if port_str.is_empty() {
+                            self.connection_dialog.config.port = if port_str.is_empty() {
                                 0
                             } else {
                                 port_str.parse().unwrap_or(0)
                             };
-                            let new_len = dialog.config.port.to_string().len();
-                            dialog.field_cursors[2] = (cursor - 1).min(new_len);
+                            let new_len = self.connection_dialog.config.port.to_string().len();
+                            self.connection_dialog.field_cursors[2] = (cursor - 1).min(new_len);
                         }
                     }
                     3 => {
-                        dialog.config.database.remove(cursor - 1);
-                        dialog.field_cursors[3] -= 1;
+                        self.connection_dialog.config.database.remove(cursor - 1);
+                        self.connection_dialog.field_cursors[3] -= 1;
                     }
                     4 => {
-                        dialog.config.username.remove(cursor - 1);
-                        dialog.field_cursors[4] -= 1;
+                        self.connection_dialog.config.username.remove(cursor - 1);
+                        self.connection_dialog.field_cursors[4] -= 1;
                     }
                     5 => {
-                        dialog.config.password.remove(cursor - 1);
-                        dialog.field_cursors[5] -= 1;
+                        self.connection_dialog.config.password.remove(cursor - 1);
+                        self.connection_dialog.field_cursors[5] -= 1;
                     }
                     _ => {}
                 }
             }
             KeyCode::Delete => {
-                if let Some(idx) = dialog.selected_saved {
-                    // Delete saved connection
-                    if idx < dialog.saved_connections.len() {
-                        dialog.saved_connections.remove(idx);
-                        let _ = ConnectionManager::save_connections(&dialog.saved_connections);
-                        if dialog.saved_connections.is_empty() {
-                            dialog.selected_saved = None;
-                        } else if idx >= dialog.saved_connections.len() {
-                            dialog.selected_saved = Some(dialog.saved_connections.len() - 1);
+                if let Some(idx) = self.connection_dialog.selected_saved {
+                    if idx < self.connection_dialog.saved_connections.len() {
+                        self.connection_dialog.saved_connections.remove(idx);
+                        let _ = ConnectionManager::save_connections(
+                            &self.connection_dialog.saved_connections,
+                        );
+                        if self.connection_dialog.saved_connections.is_empty() {
+                            self.connection_dialog.selected_saved = None;
+                        } else if idx >= self.connection_dialog.saved_connections.len() {
+                            self.connection_dialog.selected_saved =
+                                Some(self.connection_dialog.saved_connections.len() - 1);
                         }
                         self.set_status("Connection deleted".to_string(), StatusType::Info);
                     }
                 } else {
-                    // Delete character in text field
-                    if dialog.field_index == 6 {
+                    let fi = self.connection_dialog.field_index;
+                    if fi == 6 {
                         return Ok(());
                     }
-                    dialog.selected_saved = None;
-                    let cursor = dialog.field_cursors[dialog.field_index];
-                    let len = dialog_field_len(&dialog.config, dialog.field_index);
+                    self.connection_dialog.selected_saved = None;
+                    let cursor = self.connection_dialog.field_cursors[fi];
+                    let len = dialog_field_len(&self.connection_dialog.config, fi);
                     if cursor >= len {
                         return Ok(());
                     }
-                    match dialog.field_index {
+                    match fi {
                         0 => {
-                            dialog.config.name.remove(cursor);
+                            self.connection_dialog.config.name.remove(cursor);
                         }
                         1 => {
-                            dialog.config.host.remove(cursor);
+                            self.connection_dialog.config.host.remove(cursor);
                         }
                         2 => {
-                            let mut port_str = dialog.config.port.to_string();
+                            let mut port_str = self.connection_dialog.config.port.to_string();
                             if cursor < port_str.len() {
                                 port_str.remove(cursor);
-                                dialog.config.port = if port_str.is_empty() {
+                                self.connection_dialog.config.port = if port_str.is_empty() {
                                     0
                                 } else {
                                     port_str.parse().unwrap_or(0)
                                 };
-                                let new_len = dialog.config.port.to_string().len();
-                                dialog.field_cursors[2] = cursor.min(new_len);
+                                let new_len = self.connection_dialog.config.port.to_string().len();
+                                self.connection_dialog.field_cursors[2] = cursor.min(new_len);
                             }
                         }
                         3 => {
-                            dialog.config.database.remove(cursor);
+                            self.connection_dialog.config.database.remove(cursor);
                         }
                         4 => {
-                            dialog.config.username.remove(cursor);
+                            self.connection_dialog.config.username.remove(cursor);
                         }
                         5 => {
-                            dialog.config.password.remove(cursor);
+                            self.connection_dialog.config.password.remove(cursor);
                         }
                         _ => {}
                     }
@@ -599,34 +743,40 @@ impl App {
                 self.focus = Focus::Editor;
             }
             KeyCode::Up => {
-                if self.sidebar_selected > 0 {
-                    self.sidebar_selected -= 1;
+                let tab = self.tab_mut();
+                if tab.sidebar_selected > 0 {
+                    tab.sidebar_selected -= 1;
                 }
             }
             KeyCode::Down => {
-                let max = match self.sidebar_tab {
-                    SidebarTab::Databases => self.databases.len(),
-                    SidebarTab::Tables => self.tables.len() + self.schemas.len(),
-                    SidebarTab::History => self.query_history.entries().len(),
+                let tab = self.tab();
+                let max = match tab.sidebar_tab {
+                    SidebarTab::Databases => tab.databases.len(),
+                    SidebarTab::Tables => tab.tables.len() + tab.schemas.len(),
+                    SidebarTab::History => tab.query_history.entries().len(),
                 };
-                if self.sidebar_selected < max.saturating_sub(1) {
-                    self.sidebar_selected += 1;
+                let selected = tab.sidebar_selected;
+                if selected < max.saturating_sub(1) {
+                    self.tab_mut().sidebar_selected = selected + 1;
                 }
             }
             KeyCode::Enter => {
                 self.handle_sidebar_select().await?;
             }
             KeyCode::Char('1') => {
-                self.sidebar_tab = SidebarTab::Databases;
-                self.sidebar_selected = 0;
+                let tab = self.tab_mut();
+                tab.sidebar_tab = SidebarTab::Databases;
+                tab.sidebar_selected = 0;
             }
             KeyCode::Char('2') => {
-                self.sidebar_tab = SidebarTab::Tables;
-                self.sidebar_selected = 0;
+                let tab = self.tab_mut();
+                tab.sidebar_tab = SidebarTab::Tables;
+                tab.sidebar_selected = 0;
             }
             KeyCode::Char('3') => {
-                self.sidebar_tab = SidebarTab::History;
-                self.sidebar_selected = 0;
+                let tab = self.tab_mut();
+                tab.sidebar_tab = SidebarTab::History;
+                tab.sidebar_selected = 0;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.focus = Focus::ConnectionDialog;
@@ -646,7 +796,7 @@ impl App {
                 if shift {
                     self.focus = Focus::Sidebar;
                 } else {
-                    self.editor.insert_tab();
+                    self.tab_mut().editor.insert_tab();
                 }
             }
             KeyCode::BackTab => {
@@ -663,81 +813,85 @@ impl App {
                 self.focus = Focus::Results;
             }
             KeyCode::Enter => {
-                self.editor.insert_newline();
+                self.tab_mut().editor.insert_newline();
             }
             KeyCode::Char('c') if ctrl => {
-                self.editor.copy();
+                self.tab_mut().editor.copy();
             }
             KeyCode::Char('x') if ctrl => {
-                self.editor.cut();
+                self.tab_mut().editor.cut();
             }
             KeyCode::Char('v') if ctrl => {
-                self.editor.paste();
+                self.tab_mut().editor.paste();
             }
             KeyCode::Char('a') if ctrl => {
-                self.editor.select_all();
+                self.tab_mut().editor.select_all();
             }
             KeyCode::Char('z') if ctrl => {
                 // Undo (not implemented yet)
             }
             KeyCode::Char('l') if ctrl => {
                 // Clear editor
-                self.editor.clear();
+                self.tab_mut().editor.clear();
             }
             KeyCode::Up if ctrl => {
                 // Previous in history
-                if let Some(entry) = self.query_history.previous() {
-                    self.editor.set_text(&entry.query);
+                let tab = self.tab_mut();
+                if let Some(entry) = tab.query_history.previous() {
+                    let query = entry.query.clone();
+                    tab.editor.set_text(&query);
                 }
             }
             KeyCode::Down if ctrl => {
                 // Next in history
-                if let Some(entry) = self.query_history.next() {
-                    self.editor.set_text(&entry.query);
+                let tab = self.tab_mut();
+                if let Some(entry) = tab.query_history.next() {
+                    let query = entry.query.clone();
+                    tab.editor.set_text(&query);
                 }
             }
             KeyCode::Char(c) => {
-                self.editor.insert_char(c);
+                self.tab_mut().editor.insert_char(c);
             }
             KeyCode::Backspace => {
-                self.editor.backspace();
+                self.tab_mut().editor.backspace();
             }
             KeyCode::Delete => {
-                self.editor.delete();
+                self.tab_mut().editor.delete();
             }
             KeyCode::Left if ctrl => {
-                self.editor.move_word_left();
+                self.tab_mut().editor.move_word_left();
             }
             KeyCode::Right if ctrl => {
-                self.editor.move_word_right();
+                self.tab_mut().editor.move_word_right();
             }
             KeyCode::Left => {
-                self.editor.move_left();
+                self.tab_mut().editor.move_left();
             }
             KeyCode::Right => {
-                self.editor.move_right();
+                self.tab_mut().editor.move_right();
             }
             KeyCode::Up => {
-                self.editor.move_up();
+                self.tab_mut().editor.move_up();
             }
             KeyCode::Down => {
-                self.editor.move_down();
+                self.tab_mut().editor.move_down();
             }
             KeyCode::Home if ctrl => {
-                self.editor.move_to_start();
+                self.tab_mut().editor.move_to_start();
             }
             KeyCode::End if ctrl => {
-                self.editor.move_to_end();
+                self.tab_mut().editor.move_to_end();
             }
             KeyCode::Home => {
-                self.editor.move_to_line_start();
+                self.tab_mut().editor.move_to_line_start();
             }
             KeyCode::End => {
-                self.editor.move_to_line_end();
+                self.tab_mut().editor.move_to_line_end();
             }
             KeyCode::Esc => {
-                if self.editor.has_selection() {
-                    self.editor.clear_selection();
+                if self.tab().editor.has_selection() {
+                    self.tab_mut().editor.clear_selection();
                 }
             }
             _ => {}
@@ -760,61 +914,72 @@ impl App {
                 self.focus = Focus::Editor;
             }
             KeyCode::Left => {
-                if self.result_selected_col > 0 {
-                    self.result_selected_col -= 1;
+                let tab = self.tab_mut();
+                if tab.result_selected_col > 0 {
+                    tab.result_selected_col -= 1;
                 }
             }
             KeyCode::Right => {
-                if let Some(result) = self.results.get(self.current_result) {
-                    if self.result_selected_col < result.columns.len().saturating_sub(1) {
-                        self.result_selected_col += 1;
+                let tab = self.tab_mut();
+                if let Some(result) = tab.results.get(tab.current_result) {
+                    let max = result.columns.len().saturating_sub(1);
+                    if tab.result_selected_col < max {
+                        tab.result_selected_col += 1;
                     }
                 }
             }
             KeyCode::Up => {
-                if self.result_selected_row > 0 {
-                    self.result_selected_row -= 1;
+                let tab = self.tab_mut();
+                if tab.result_selected_row > 0 {
+                    tab.result_selected_row -= 1;
                 }
             }
             KeyCode::Down => {
-                if let Some(result) = self.results.get(self.current_result) {
-                    if self.result_selected_row < result.rows.len().saturating_sub(1) {
-                        self.result_selected_row += 1;
+                let tab = self.tab_mut();
+                if let Some(result) = tab.results.get(tab.current_result) {
+                    let max = result.rows.len().saturating_sub(1);
+                    if tab.result_selected_row < max {
+                        tab.result_selected_row += 1;
                     }
                 }
             }
             KeyCode::Home => {
-                self.result_selected_col = 0;
+                self.tab_mut().result_selected_col = 0;
             }
             KeyCode::End => {
-                if let Some(result) = self.results.get(self.current_result) {
-                    self.result_selected_col = result.columns.len().saturating_sub(1);
+                let tab = self.tab_mut();
+                if let Some(result) = tab.results.get(tab.current_result) {
+                    tab.result_selected_col = result.columns.len().saturating_sub(1);
                 }
             }
             KeyCode::PageUp => {
-                self.result_selected_row = self.result_selected_row.saturating_sub(20);
+                let tab = self.tab_mut();
+                tab.result_selected_row = tab.result_selected_row.saturating_sub(20);
             }
             KeyCode::PageDown => {
-                if let Some(result) = self.results.get(self.current_result) {
-                    self.result_selected_row =
-                        (self.result_selected_row + 20).min(result.rows.len().saturating_sub(1));
+                let tab = self.tab_mut();
+                if let Some(result) = tab.results.get(tab.current_result) {
+                    let max = result.rows.len().saturating_sub(1);
+                    tab.result_selected_row = (tab.result_selected_row + 20).min(max);
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.copy_selected_cell();
             }
             KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.current_result > 0 {
-                    self.current_result -= 1;
-                    self.result_selected_row = 0;
-                    self.result_selected_col = 0;
+                let tab = self.tab_mut();
+                if tab.current_result > 0 {
+                    tab.current_result -= 1;
+                    tab.result_selected_row = 0;
+                    tab.result_selected_col = 0;
                 }
             }
             KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.current_result < self.results.len().saturating_sub(1) {
-                    self.current_result += 1;
-                    self.result_selected_row = 0;
-                    self.result_selected_col = 0;
+                let tab = self.tab_mut();
+                if tab.current_result < tab.results.len().saturating_sub(1) {
+                    tab.current_result += 1;
+                    tab.result_selected_row = 0;
+                    tab.result_selected_col = 0;
                 }
             }
             _ => {}
@@ -834,11 +999,13 @@ impl App {
     }
 
     async fn handle_sidebar_select(&mut self) -> Result<()> {
-        match self.sidebar_tab {
+        let sidebar_tab = self.tab().sidebar_tab;
+        let sidebar_selected = self.tab().sidebar_selected;
+        match sidebar_tab {
             SidebarTab::Databases => {
-                if let Some(db) = self.databases.get(self.sidebar_selected) {
+                if let Some(db) = self.tab().databases.get(sidebar_selected) {
                     let db_name = db.name.clone();
-                    self.connection.switch_database(&db_name).await?;
+                    self.tab_mut().connection.switch_database(&db_name).await?;
                     self.refresh_schema().await?;
                     self.set_status(
                         format!("Switched to database: {}", db_name),
@@ -849,25 +1016,31 @@ impl App {
             SidebarTab::Tables => {
                 // Calculate if it's a schema or table
                 let mut index = 0;
-                for schema in &self.schemas {
-                    if index == self.sidebar_selected {
+                let tab = self.tab();
+                let schemas: Vec<_> = tab.schemas.to_vec();
+                let tables: Vec<_> = tab.tables.to_vec();
+                let expanded: Vec<_> = tab.expanded_schemas.clone();
+
+                for schema in &schemas {
+                    if index == sidebar_selected {
                         // Toggle schema expansion
-                        if self.expanded_schemas.contains(&schema.name) {
-                            self.expanded_schemas.retain(|s| s != &schema.name);
+                        let tab = self.tab_mut();
+                        if expanded.contains(&schema.name) {
+                            tab.expanded_schemas.retain(|s| s != &schema.name);
                         } else {
-                            self.expanded_schemas.push(schema.name.clone());
+                            tab.expanded_schemas.push(schema.name.clone());
                         }
                         return Ok(());
                     }
                     index += 1;
 
-                    if self.expanded_schemas.contains(&schema.name) {
-                        for table in &self.tables {
+                    if expanded.contains(&schema.name) {
+                        for table in &tables {
                             if table.schema == schema.name {
-                                if index == self.sidebar_selected {
+                                if index == sidebar_selected {
                                     // Insert table name into editor
                                     let full_name = format!("{}.{}", table.schema, table.name);
-                                    self.editor.insert_text(&full_name);
+                                    self.tab_mut().editor.insert_text(&full_name);
                                     self.focus = Focus::Editor;
                                     return Ok(());
                                 }
@@ -878,9 +1051,10 @@ impl App {
                 }
             }
             SidebarTab::History => {
-                let entries = self.query_history.entries();
-                if let Some(entry) = entries.get(entries.len() - 1 - self.sidebar_selected) {
-                    self.editor.set_text(&entry.query);
+                let entries = self.tab().query_history.entries();
+                if let Some(entry) = entries.get(entries.len() - 1 - sidebar_selected) {
+                    let query = entry.query.clone();
+                    self.tab_mut().editor.set_text(&query);
                     self.focus = Focus::Editor;
                 }
             }
@@ -906,7 +1080,7 @@ impl App {
         }
 
         // Don't start another connection if one is already in progress
-        if self.pending_connection.is_some() {
+        if self.tab().pending_connection.is_some() {
             return;
         }
 
@@ -918,11 +1092,13 @@ impl App {
 
         let config_for_task = config.clone();
         let handle = tokio::spawn(async move { create_client(&config_for_task).await });
-        self.pending_connection = Some((config, handle));
+        self.tab_mut().pending_connection = Some((config, handle));
     }
 
     async fn finish_connect(&mut self, config: ConnectionConfig, client: Client) -> Result<()> {
-        self.connection.apply_client(config.clone(), client);
+        self.tab_mut()
+            .connection
+            .apply_client(config.clone(), client);
         self.stop_loading();
         self.connection_dialog.status_message = None;
         self.connection_dialog.active = false;
@@ -953,10 +1129,10 @@ impl App {
     }
 
     async fn refresh_schema(&mut self) -> Result<()> {
-        if self.connection.client.is_some() {
+        if self.tab().connection.client.is_some() {
             self.start_loading("Loading schema...".to_string());
 
-            let client = self.connection.client.as_ref().unwrap();
+            let client = self.tab().connection.client.as_ref().unwrap();
 
             let db_result = get_databases(client).await;
             let schema_result = get_schemas(client).await;
@@ -994,37 +1170,39 @@ impl App {
                 }
             };
 
-            self.databases = databases;
-            self.schemas = schemas;
-            self.tables = all_tables;
+            let tab = self.tab_mut();
+            tab.databases = databases;
+            tab.schemas = schemas;
+            tab.tables = all_tables;
             self.stop_loading();
         }
         Ok(())
     }
 
     async fn execute_query(&mut self) -> Result<()> {
-        let query = self.editor.text();
+        let query = self.tab().editor.text();
         if query.trim().is_empty() {
             return Ok(());
         }
 
-        if self.connection.client.is_some() {
+        if self.tab().connection.client.is_some() {
             self.start_loading("Executing query...".to_string());
 
-            let client = self.connection.client.as_ref().unwrap();
+            let client = self.tab().connection.client.as_ref().unwrap();
             let result = execute_query(client, &query).await?;
             self.stop_loading();
 
             // Add to history
+            let db = self.tab().connection.current_database.clone();
             let entry = HistoryEntry {
                 query: query.clone(),
                 timestamp: chrono::Utc::now(),
-                database: self.connection.current_database.clone(),
+                database: db,
                 execution_time_ms: result.execution_time.as_millis() as u64,
                 success: result.error.is_none(),
             };
-            self.query_history.add(entry);
-            let _ = self.query_history.save();
+            self.tab_mut().query_history.add(entry);
+            let _ = self.tab_mut().query_history.save();
 
             // Update status
             if let Some(err) = &result.error {
@@ -1049,10 +1227,11 @@ impl App {
                 );
             }
 
-            self.results.push(result);
-            self.current_result = self.results.len() - 1;
-            self.result_selected_row = 0;
-            self.result_selected_col = 0;
+            let tab = self.tab_mut();
+            tab.results.push(result);
+            tab.current_result = tab.results.len() - 1;
+            tab.result_selected_row = 0;
+            tab.result_selected_col = 0;
         } else {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }
@@ -1061,9 +1240,10 @@ impl App {
     }
 
     fn copy_selected_cell(&mut self) {
-        if let Some(result) = self.results.get(self.current_result) {
-            if let Some(row) = result.rows.get(self.result_selected_row) {
-                if let Some(cell) = row.get(self.result_selected_col) {
+        let tab = self.tab();
+        if let Some(result) = tab.results.get(tab.current_result) {
+            if let Some(row) = result.rows.get(tab.result_selected_row) {
+                if let Some(cell) = row.get(tab.result_selected_col) {
                     let text = cell.display();
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         let _ = clipboard.set_text(&text);
@@ -1102,28 +1282,30 @@ impl App {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
         }
 
-        // Poll pending connection task
-        if let Some((_, handle)) = &self.pending_connection {
-            if handle.is_finished() {
-                let (config, handle) = self.pending_connection.take().unwrap();
-                match handle.await {
-                    Ok(Ok(client)) => {
-                        self.finish_connect(config, client).await?;
-                    }
-                    Ok(Err(e)) => {
-                        self.stop_loading();
-                        let msg = format!("Connection failed: {}", e);
-                        self.connection_dialog.status_message =
-                            Some((msg.clone(), StatusType::Error));
-                        self.set_status(msg, StatusType::Error);
-                    }
-                    Err(e) => {
-                        self.stop_loading();
-                        let msg = format!("Connection task failed: {}", e);
-                        self.connection_dialog.status_message =
-                            Some((msg.clone(), StatusType::Error));
-                        self.set_status(msg, StatusType::Error);
-                    }
+        // Poll pending connection task on active tab
+        let has_pending = self
+            .tab()
+            .pending_connection
+            .as_ref()
+            .is_some_and(|(_, h)| h.is_finished());
+
+        if has_pending {
+            let (config, handle) = self.tab_mut().pending_connection.take().unwrap();
+            match handle.await {
+                Ok(Ok(client)) => {
+                    self.finish_connect(config, client).await?;
+                }
+                Ok(Err(e)) => {
+                    self.stop_loading();
+                    let msg = format!("Connection failed: {}", e);
+                    self.connection_dialog.status_message = Some((msg.clone(), StatusType::Error));
+                    self.set_status(msg, StatusType::Error);
+                }
+                Err(e) => {
+                    self.stop_loading();
+                    let msg = format!("Connection task failed: {}", e);
+                    self.connection_dialog.status_message = Some((msg.clone(), StatusType::Error));
+                    self.set_status(msg, StatusType::Error);
                 }
             }
         }

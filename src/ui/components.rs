@@ -12,30 +12,49 @@ use crate::ui::{
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Create main layout
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Header
-            Constraint::Min(0),    // Main content
-            Constraint::Length(1), // Status bar
-        ])
-        .split(frame.area());
+    // Create main layout - add tab bar row when there are multiple tabs
+    let has_tabs = app.tabs.len() > 1;
+    let chunks = if has_tabs {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Header
+                Constraint::Length(1), // Tab bar
+                Constraint::Min(0),    // Main content
+                Constraint::Length(1), // Status bar
+            ])
+            .split(frame.area())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Header
+                Constraint::Length(0), // No tab bar
+                Constraint::Min(0),    // Main content
+                Constraint::Length(1), // Status bar
+            ])
+            .split(frame.area())
+    };
 
     // Draw header
     draw_header(frame, app, chunks[0]);
+
+    // Draw tab bar
+    if has_tabs {
+        draw_tab_bar(frame, app, chunks[1]);
+    }
 
     // Draw main content
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(app.sidebar_width), Constraint::Min(0)])
-        .split(chunks[1]);
+        .split(chunks[2]);
 
     draw_sidebar(frame, app, main_chunks[0]);
     draw_main_panel(frame, app, main_chunks[1]);
 
     // Draw status bar
-    draw_status_bar(frame, app, chunks[2]);
+    draw_status_bar(frame, app, chunks[3]);
 
     // Draw toasts
     if !app.show_help {
@@ -53,15 +72,51 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
-    let connection_info = if app.connection.is_connected() {
+    let tab_titles: Vec<String> = app
+        .tabs
+        .iter()
+        .map(|tab| {
+            let indicator = if tab.connection.is_connected() {
+                "●"
+            } else {
+                "○"
+            };
+            let name = tab.display_name();
+            format!(" {} {} ", indicator, name)
+        })
+        .collect();
+
+    let tabs_widget = Tabs::new(tab_titles)
+        .select(app.active_tab)
+        .style(
+            Style::default()
+                .fg(theme.text_secondary)
+                .bg(theme.bg_secondary),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .bg(theme.bg_primary)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider("│");
+
+    frame.render_widget(tabs_widget, area);
+}
+
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.theme;
+    let tab = app.tab();
+
+    let connection_info = if tab.connection.is_connected() {
         format!(
             " {} | {} | {} ",
-            app.connection.config.display_string(),
-            app.connection.current_database,
-            app.connection.current_schema
+            tab.connection.config.display_string(),
+            tab.connection.current_database,
+            tab.connection.current_schema
         )
     } else {
         " Not Connected ".to_string()
@@ -81,6 +136,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
+    let tab = app.tab();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -92,7 +148,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     // Draw tabs
     let tab_titles = vec!["Databases", "Tables", "History"];
-    let selected_tab = match app.sidebar_tab {
+    let selected_tab = match tab.sidebar_tab {
         SidebarTab::Databases => 0,
         SidebarTab::Tables => 1,
         SidebarTab::History => 2,
@@ -115,7 +171,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(tabs, chunks[0]);
 
     // Draw content based on selected tab
-    match app.sidebar_tab {
+    match tab.sidebar_tab {
         SidebarTab::Databases => draw_databases_list(frame, app, chunks[1]),
         SidebarTab::Tables => draw_tables_tree(frame, app, chunks[1]),
         SidebarTab::History => draw_history_list(frame, app, chunks[1]),
@@ -125,15 +181,16 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_databases_list(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
+    let tab = app.tab();
 
-    let items: Vec<ListItem> = app
+    let items: Vec<ListItem> = tab
         .databases
         .iter()
         .enumerate()
         .map(|(i, db)| {
-            let style = if i == app.sidebar_selected {
+            let style = if i == tab.sidebar_selected {
                 theme.selected()
-            } else if db.name == app.connection.current_database {
+            } else if db.name == tab.connection.current_database {
                 Style::default()
                     .fg(theme.text_accent)
                     .add_modifier(Modifier::BOLD)
@@ -163,15 +220,16 @@ fn draw_databases_list(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
+    let tab = app.tab();
 
     let mut items: Vec<ListItem> = Vec::new();
     let mut index = 0;
 
-    for schema in &app.schemas {
-        let expanded = app.expanded_schemas.contains(&schema.name);
+    for schema in &tab.schemas {
+        let expanded = tab.expanded_schemas.contains(&schema.name);
         let icon = if expanded { "▼" } else { "▶" };
 
-        let style = if index == app.sidebar_selected {
+        let style = if index == tab.sidebar_selected {
             theme.selected()
         } else {
             Style::default().fg(theme.text_accent)
@@ -181,7 +239,7 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         index += 1;
 
         if expanded {
-            for table in &app.tables {
+            for table in &tab.tables {
                 if table.schema == schema.name {
                     let table_icon = match table.table_type {
                         crate::db::TableType::Table => "󰓫",
@@ -190,7 +248,7 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
                         crate::db::TableType::ForeignTable => "󰒍",
                     };
 
-                    let style = if index == app.sidebar_selected {
+                    let style = if index == tab.sidebar_selected {
                         theme.selected()
                     } else {
                         Style::default().fg(theme.text_primary)
@@ -223,8 +281,9 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_history_list(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
+    let tab = app.tab();
 
-    let entries = app.query_history.entries();
+    let entries = tab.query_history.entries();
     let items: Vec<ListItem> = entries
         .iter()
         .rev()
@@ -238,7 +297,7 @@ fn draw_history_list(frame: &mut Frame, app: &App, area: Rect) {
                 .collect::<String>()
                 .replace('\n', " ");
 
-            let style = if i == app.sidebar_selected {
+            let style = if i == tab.sidebar_selected {
                 theme.selected()
             } else {
                 Style::default().fg(theme.text_primary)
@@ -279,6 +338,7 @@ fn draw_main_panel(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Editor;
+    let tab = app.tab();
 
     let inner_area = Block::default()
         .borders(Borders::ALL)
@@ -307,16 +367,16 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
 
     // Syntax highlight and render editor content
     let visible_height = inner_area.height as usize;
-    let lines: Vec<Line> = app
+    let lines: Vec<Line> = tab
         .editor
         .lines
         .iter()
-        .skip(app.editor.scroll_offset)
+        .skip(tab.editor.scroll_offset)
         .take(visible_height)
         .enumerate()
         .map(|(line_idx, line_text)| {
-            let actual_line = line_idx + app.editor.scroll_offset;
-            highlight_sql_line(line_text, theme, actual_line, &app.editor)
+            let actual_line = line_idx + tab.editor.scroll_offset;
+            highlight_sql_line(line_text, theme, actual_line, &tab.editor)
         })
         .collect();
 
@@ -325,8 +385,8 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
 
     // Show cursor
     if focused {
-        let cursor_x = inner_area.x + app.editor.cursor_x as u16;
-        let cursor_y = inner_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
+        let cursor_x = inner_area.x + tab.editor.cursor_x as u16;
+        let cursor_y = inner_area.y + (tab.editor.cursor_y - tab.editor.scroll_offset) as u16;
         if cursor_y < inner_area.y + inner_area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
         }
@@ -463,16 +523,17 @@ fn create_word_span<'a>(word: &str, theme: &Theme, base_style: Style) -> Span<'a
 fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Results;
+    let tab = app.tab();
 
-    let result_index = if app.results.is_empty() {
+    let result_index = if tab.results.is_empty() {
         0
     } else {
-        app.current_result + 1
+        tab.current_result + 1
     };
-    let result_total = app.results.len();
+    let result_total = tab.results.len();
 
     // Build title with execution time and row count
-    let title = if let Some(result) = app.results.get(app.current_result) {
+    let title = if let Some(result) = tab.results.get(tab.current_result) {
         let time_ms = result.execution_time.as_secs_f64() * 1000.0;
         if result.error.is_some() {
             format!(
@@ -507,7 +568,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(result) = app.results.get(app.current_result) {
+    if let Some(result) = tab.results.get(tab.current_result) {
         if let Some(error) = &result.error {
             let error_text = Paragraph::new(error.as_str())
                 .style(theme.status_error())
@@ -531,6 +592,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResult, area: Rect) {
     let theme = &app.theme;
+    let tab = app.tab();
 
     // Calculate column widths
     let col_widths: Vec<Constraint> = result
@@ -548,7 +610,7 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         .iter()
         .enumerate()
         .map(|(i, col)| {
-            let style = if i == app.result_selected_col {
+            let style = if i == tab.result_selected_col {
                 Style::default()
                     .fg(theme.text_accent)
                     .add_modifier(Modifier::BOLD)
@@ -567,7 +629,7 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
 
     // Create rows
     let visible_height = area.height.saturating_sub(2) as usize;
-    let start_row = app.result_scroll_y;
+    let start_row = tab.result_scroll_y;
 
     let rows: Vec<Row> = result
         .rows
@@ -583,8 +645,8 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
                     let display = cell.display();
                     let truncated: String = display.chars().take(40).collect();
 
-                    let style = if row_idx == app.result_selected_row {
-                        if col_idx == app.result_selected_col {
+                    let style = if row_idx == tab.result_selected_row {
+                        if col_idx == tab.result_selected_col {
                             Style::default()
                                 .bg(theme.bg_highlight)
                                 .fg(theme.text_accent)
@@ -614,27 +676,33 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
+    let tab = app.tab();
 
     // Left section: spinner + loading message OR connection status
     let left_text = if app.is_loading {
         let spinner = SPINNER_FRAMES[app.spinner_frame];
         format!(" {} {}", spinner, app.loading_message)
-    } else if app.connection.is_connected() {
-        format!(" Connected: {}", app.connection.config.display_string())
+    } else if tab.connection.is_connected() {
+        format!(" Connected: {}", tab.connection.config.display_string())
     } else {
         " Disconnected".to_string()
     };
 
     let left_style = if app.is_loading {
         Style::default().fg(theme.info).bg(theme.bg_secondary)
-    } else if app.connection.is_connected() {
+    } else if tab.connection.is_connected() {
         Style::default().fg(theme.success).bg(theme.bg_secondary)
     } else {
         Style::default().fg(theme.text_muted).bg(theme.bg_secondary)
     };
 
     // Right section: help hints
-    let right_text = "? Help | Ctrl+Q/D Quit ";
+    let tab_hint = if app.tabs.len() > 1 {
+        format!("Tab {}/{} | ", app.active_tab + 1, app.tabs.len())
+    } else {
+        String::new()
+    };
+    let right_text = format!("{}? Help | Ctrl+Q/D Quit ", tab_hint);
 
     // Calculate padding
     let left_len = left_text.len() as u16;
@@ -648,7 +716,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().bg(theme.bg_secondary),
         ),
         Span::styled(
-            right_text.to_string(),
+            right_text,
             Style::default().fg(theme.text_muted).bg(theme.bg_secondary),
         ),
     ]);
@@ -815,7 +883,7 @@ fn draw_connection_dialog(frame: &mut Frame, app: &App) {
     }
 
     // Draw dynamic hint text
-    let button_text = if app.pending_connection.is_some() {
+    let button_text = if app.tab().pending_connection.is_some() {
         " Esc to cancel "
     } else if dialog.selected_saved.is_some() {
         " Enter to load | Del to delete | Tab to switch fields | Esc to cancel "
@@ -946,6 +1014,12 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Q/D       Quit",
         "   Ctrl+C         Connect dialog",
         "   ?              Toggle help",
+        "",
+        " TABS",
+        "   Ctrl+T         New tab",
+        "   Ctrl+W         Close tab",
+        "   Alt+←/→        Prev/Next tab",
+        "   Alt+1..9       Switch to tab N",
         "",
         " NAVIGATION",
         "   Tab             Next pane",
