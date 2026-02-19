@@ -127,6 +127,9 @@ pub struct App {
     pub result_scroll_y: usize,
     pub result_selected_row: usize,
     pub result_selected_col: usize,
+    pub result_sort_column: Option<usize>,
+    pub result_sort_ascending: bool,
+    pub result_sort_indices: Vec<usize>,
 
     // Toasts
     pub toasts: Vec<Toast>,
@@ -298,6 +301,9 @@ impl App {
             result_scroll_y: 0,
             result_selected_row: 0,
             result_selected_col: 0,
+            result_sort_column: None,
+            result_sort_ascending: true,
+            result_sort_indices: Vec::new(),
 
             toasts: Vec::new(),
             is_loading: false,
@@ -918,12 +924,16 @@ impl App {
                     self.focus = Focus::ExportPicker;
                 }
             }
+            KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_column_sort();
+            }
             KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.current_result > 0 {
                     self.current_result -= 1;
                     self.result_selected_row = 0;
                     self.result_selected_col = 0;
                     self.result_scroll_y = 0;
+                    self.clear_sort();
                 }
             }
             KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -932,6 +942,7 @@ impl App {
                     self.result_selected_row = 0;
                     self.result_selected_col = 0;
                     self.result_scroll_y = 0;
+                    self.clear_sort();
                 }
             }
             _ => {}
@@ -1503,11 +1514,83 @@ impl App {
             self.current_result = self.results.len() - 1;
             self.result_selected_row = 0;
             self.result_selected_col = 0;
+            self.clear_sort();
         } else {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }
 
         Ok(())
+    }
+
+    fn toggle_column_sort(&mut self) {
+        let col = self.result_selected_col;
+        if let Some(result) = self.results.get(self.current_result) {
+            if col >= result.columns.len() {
+                return;
+            }
+
+            if self.result_sort_column == Some(col) {
+                if self.result_sort_ascending {
+                    // Was ascending, switch to descending
+                    self.result_sort_ascending = false;
+                } else {
+                    // Was descending, clear sort
+                    self.result_sort_column = None;
+                    self.result_sort_ascending = true;
+                    self.result_sort_indices.clear();
+                    return;
+                }
+            } else {
+                // New column, start ascending
+                self.result_sort_column = Some(col);
+                self.result_sort_ascending = true;
+            }
+
+            self.rebuild_sort_indices();
+        }
+    }
+
+    fn rebuild_sort_indices(&mut self) {
+        let col = match self.result_sort_column {
+            Some(c) => c,
+            None => return,
+        };
+        let result = match self.results.get(self.current_result) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let ascending = self.result_sort_ascending;
+        let mut indices: Vec<usize> = (0..result.rows.len()).collect();
+        indices.sort_by(|&a, &b| {
+            let val_a = &result.rows[a][col];
+            let val_b = &result.rows[b][col];
+            let cmp = val_a.sort_cmp(val_b);
+            if ascending {
+                cmp
+            } else {
+                cmp.reverse()
+            }
+        });
+        self.result_sort_indices = indices;
+    }
+
+    fn clear_sort(&mut self) {
+        self.result_sort_column = None;
+        self.result_sort_ascending = true;
+        self.result_sort_indices.clear();
+    }
+
+    /// Map a display row index to the actual row index, accounting for sort order.
+    pub fn sorted_row_index(&self, display_idx: usize) -> usize {
+        if self.result_sort_indices.is_empty() {
+            display_idx
+        } else {
+            self.result_sort_indices
+                .get(display_idx)
+                .copied()
+                .unwrap_or(display_idx)
+        }
     }
 
     fn copy_selected_cell(&mut self) {

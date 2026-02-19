@@ -70,6 +70,81 @@ impl CellValue {
     pub fn display_width(&self) -> usize {
         unicode_width::UnicodeWidthStr::width(self.display().as_str())
     }
+
+    /// Compare two CellValues for sorting purposes.
+    /// Returns an Ordering suitable for sort operations.
+    /// NULLs are always sorted last regardless of direction.
+    pub fn sort_cmp(&self, other: &CellValue) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            // NULLs always last
+            (CellValue::Null, CellValue::Null) => Ordering::Equal,
+            (CellValue::Null, _) => Ordering::Greater,
+            (_, CellValue::Null) => Ordering::Less,
+
+            // Booleans: false < true
+            (CellValue::Bool(a), CellValue::Bool(b)) => a.cmp(b),
+
+            // Integers
+            (CellValue::Int16(a), CellValue::Int16(b)) => a.cmp(b),
+            (CellValue::Int32(a), CellValue::Int32(b)) => a.cmp(b),
+            (CellValue::Int64(a), CellValue::Int64(b)) => a.cmp(b),
+
+            // Cross-integer comparison: promote to i64
+            (CellValue::Int16(a), CellValue::Int32(b)) => (*a as i64).cmp(&(*b as i64)),
+            (CellValue::Int32(a), CellValue::Int16(b)) => (*a as i64).cmp(&(*b as i64)),
+            (CellValue::Int16(a), CellValue::Int64(b)) => (*a as i64).cmp(b),
+            (CellValue::Int64(a), CellValue::Int16(b)) => a.cmp(&(*b as i64)),
+            (CellValue::Int32(a), CellValue::Int64(b)) => (*a as i64).cmp(b),
+            (CellValue::Int64(a), CellValue::Int32(b)) => a.cmp(&(*b as i64)),
+
+            // Floats
+            (CellValue::Float32(a), CellValue::Float32(b)) => {
+                a.partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float64(a), CellValue::Float64(b)) => {
+                a.partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float32(a), CellValue::Float64(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float64(a), CellValue::Float32(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
+
+            // Numeric vs float: promote int to f64
+            (CellValue::Int16(a), CellValue::Float64(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float64(a), CellValue::Int16(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Int32(a), CellValue::Float64(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float64(a), CellValue::Int32(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Int64(a), CellValue::Float64(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (CellValue::Float64(a), CellValue::Int64(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
+
+            // Text
+            (CellValue::Text(a), CellValue::Text(b)) => a.cmp(b),
+
+            // Dates and times
+            (CellValue::Date(a), CellValue::Date(b)) => a.cmp(b),
+            (CellValue::Time(a), CellValue::Time(b)) => a.cmp(b),
+            (CellValue::DateTime(a), CellValue::DateTime(b)) => a.cmp(b),
+            (CellValue::TimestampTz(a), CellValue::TimestampTz(b)) => a.cmp(b),
+
+            // Fallback: compare display strings
+            (a, b) => a.display().cmp(&b.display()),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -291,6 +366,105 @@ mod tests {
         assert!(r.error.is_some());
         assert_eq!(r.error.unwrap(), "bad query");
         assert!(r.rows.is_empty());
+    }
+
+    // --- CellValue sort_cmp ---
+
+    #[test]
+    fn test_sort_cmp_nulls_last() {
+        use std::cmp::Ordering;
+        assert_eq!(CellValue::Null.sort_cmp(&CellValue::Null), Ordering::Equal);
+        assert_eq!(
+            CellValue::Null.sort_cmp(&CellValue::Int32(1)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            CellValue::Int32(1).sort_cmp(&CellValue::Null),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_sort_cmp_integers() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            CellValue::Int32(1).sort_cmp(&CellValue::Int32(2)),
+            Ordering::Less
+        );
+        assert_eq!(
+            CellValue::Int32(5).sort_cmp(&CellValue::Int32(5)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            CellValue::Int64(100).sort_cmp(&CellValue::Int64(50)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_sort_cmp_cross_integer() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            CellValue::Int16(10).sort_cmp(&CellValue::Int32(20)),
+            Ordering::Less
+        );
+        assert_eq!(
+            CellValue::Int32(30).sort_cmp(&CellValue::Int64(30)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_sort_cmp_floats() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            CellValue::Float64(1.5).sort_cmp(&CellValue::Float64(2.5)),
+            Ordering::Less
+        );
+        assert_eq!(
+            CellValue::Float32(3.0).sort_cmp(&CellValue::Float64(3.0)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_sort_cmp_text() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            CellValue::Text("apple".into()).sort_cmp(&CellValue::Text("banana".into())),
+            Ordering::Less
+        );
+        assert_eq!(
+            CellValue::Text("zebra".into()).sort_cmp(&CellValue::Text("aardvark".into())),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_sort_cmp_booleans() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            CellValue::Bool(false).sort_cmp(&CellValue::Bool(true)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_sort_stable_with_nulls() {
+        let mut values = vec![
+            CellValue::Int32(3),
+            CellValue::Null,
+            CellValue::Int32(1),
+            CellValue::Null,
+            CellValue::Int32(2),
+        ];
+        values.sort_by(|a, b| a.sort_cmp(b));
+        // Nulls should be at the end
+        assert_eq!(values[0].display(), "1");
+        assert_eq!(values[1].display(), "2");
+        assert_eq!(values[2].display(), "3");
+        assert_eq!(values[3].display(), "NULL");
+        assert_eq!(values[4].display(), "NULL");
     }
 }
 
