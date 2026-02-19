@@ -12,6 +12,7 @@ A beautiful, fast TUI SQL editor for PostgreSQL written in Rust.
 - **Query Results Table**: Scrollable, navigable results with cell selection
 - **Query History**: Persistent history with search capability
 - **Connection Management**: Save and manage multiple PostgreSQL connections
+- **Vim Keybindings**: Optional vim mode with Normal, Insert, Visual, and Visual Line modes
 - **Keyboard-First Design**: Efficient navigation without leaving the keyboard
 - **Dark Theme**: Easy on the eyes for long coding sessions
 
@@ -128,6 +129,41 @@ cargo install pgrsql
 | `Ctrl+Left/Right` | Move by word |
 | `Home/End` | Move to line start/end |
 | `Ctrl+Home/End` | Move to document start/end |
+| `F2` or `Alt+V` | Toggle Vim mode |
+
+### Vim Mode
+
+Press `F2` or `Alt+V` in the editor to toggle Vim keybindings. Your preference is saved across sessions.
+
+The status bar shows the current mode: `-- NORMAL --`, `-- INSERT --`, `-- VISUAL --`, or `-- V-LINE --`.
+
+#### Vim Normal Mode
+| Key | Action |
+|-----|--------|
+| `i` / `a` | Insert before/after cursor |
+| `I` / `A` | Insert at line start/end |
+| `o` / `O` | Open line below/above |
+| `h` `j` `k` `l` | Move left/down/up/right |
+| `w` / `b` / `e` | Word forward/back/end |
+| `0` / `$` / `^` | Line start/end/first non-blank |
+| `gg` / `G` | Go to top/bottom |
+| `{` / `}` | Paragraph up/down |
+| `x` / `X` | Delete char forward/backward |
+| `dd` | Delete line |
+| `yy` | Yank (copy) line |
+| `d`+motion | Delete with motion |
+| `c`+motion | Change with motion |
+| `p` / `P` | Paste after/before |
+| `v` / `V` | Enter Visual / Visual Line mode |
+
+#### Vim Visual Mode
+| Key | Action |
+|-----|--------|
+| Motion keys | Extend selection |
+| `d` / `x` | Delete selection |
+| `y` | Yank selection |
+| `c` | Change selection |
+| `Esc` | Back to Normal mode |
 
 #### Sidebar
 | Key | Action |

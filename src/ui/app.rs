@@ -661,10 +661,18 @@ impl App {
 
     async fn handle_editor_input(&mut self, key: KeyEvent) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-        // Toggle vim mode with Ctrl+Shift+V
-        if ctrl && shift && key.code == KeyCode::Char('V') {
+        // Toggle vim mode: Ctrl+Shift+V (uppercase V implies shift), Alt+V, or F2
+        // Ctrl+Shift+V: most terminals report as Char('V') with only CONTROL
+        // (the SHIFT modifier is implicit in the uppercase letter).
+        // Alt+V and F2 are universal fallbacks for terminals that intercept Ctrl+Shift+V as paste.
+        let toggle_vim = match key.code {
+            KeyCode::Char('V') if ctrl => true,
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => true,
+            KeyCode::F(2) => true,
+            _ => false,
+        };
+        if toggle_vim {
             self.vim_enabled = !self.vim_enabled;
             self.vim_mode = VimMode::Normal;
             self.vim_pending_op = None;

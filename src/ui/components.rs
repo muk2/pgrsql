@@ -986,7 +986,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+↑/↓       Navigate history",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
         "   Ctrl+A         Select all",
-        "   Ctrl+Shift+V   Toggle Vim mode",
+        "   F2/Alt+V       Toggle Vim mode",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
