@@ -5,10 +5,12 @@ use tokio::task::JoinHandle;
 use tokio_postgres::Client;
 
 use crate::db::{
-    create_client, execute_query, get_databases, get_schemas, get_tables, ColumnDetails,
-    ConnectionConfig, ConnectionManager, DatabaseInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
+    create_client, execute_query, get_columns, get_databases, get_indexes, get_schemas,
+    get_table_ddl, get_tables, ColumnDetails, ConnectionConfig, ConnectionManager, DatabaseInfo,
+    IndexInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
+use crate::explain::{is_explain_query, parse_explain_output, QueryPlan};
 use crate::ui::{Theme, SQL_KEYWORDS, SQL_TYPES};
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -20,6 +22,58 @@ pub enum Focus {
     Results,
     ConnectionDialog,
     Help,
+    TableInspector,
+    ExportPicker,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableInspectorState {
+    pub table_name: String,
+    pub schema_name: String,
+    pub columns: Vec<ColumnDetails>,
+    pub indexes: Vec<IndexInfo>,
+    pub ddl: String,
+    pub show_ddl: bool,
+    pub scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    SqlInsert,
+    Tsv,
+    ClipboardCsv,
+}
+
+pub const EXPORT_FORMATS: &[ExportFormat] = &[
+    ExportFormat::Csv,
+    ExportFormat::Json,
+    ExportFormat::SqlInsert,
+    ExportFormat::Tsv,
+    ExportFormat::ClipboardCsv,
+];
+
+impl ExportFormat {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "CSV (.csv)",
+            ExportFormat::Json => "JSON (.json)",
+            ExportFormat::SqlInsert => "SQL INSERT (.sql)",
+            ExportFormat::Tsv => "TSV (.tsv)",
+            ExportFormat::ClipboardCsv => "Copy to clipboard (CSV)",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::SqlInsert => "sql",
+            ExportFormat::Tsv => "tsv",
+            ExportFormat::ClipboardCsv => "csv",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,6 +118,9 @@ pub struct App {
     pub editor: TextBuffer,
     pub query_history: QueryHistory,
 
+    // Layout
+    pub editor_height_percent: u16,
+
     // Results
     pub results: Vec<QueryResult>,
     pub current_result: usize,
@@ -85,6 +142,17 @@ pub struct App {
 
     // Autocomplete
     pub autocomplete: AutocompleteState,
+
+    // EXPLAIN plan
+    pub explain_plans: Vec<Option<QueryPlan>>,
+    pub show_visual_plan: bool,
+    pub plan_scroll: usize,
+
+    // Table Inspector
+    pub table_inspector: Option<TableInspectorState>,
+
+    // Export
+    pub export_selected: usize,
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
@@ -328,6 +396,8 @@ impl App {
             editor: TextBuffer::new(),
             query_history,
 
+            editor_height_percent: 40,
+
             results: Vec::new(),
             current_result: 0,
             result_scroll_x: 0,
@@ -341,6 +411,13 @@ impl App {
             spinner_frame: 0,
             show_help: false,
             autocomplete: AutocompleteState::default(),
+
+            explain_plans: Vec::new(),
+            show_visual_plan: true,
+            plan_scroll: 0,
+
+            table_inspector: None,
+            export_selected: 0,
             pending_connection: None,
         }
     }
@@ -425,6 +502,8 @@ impl App {
             Focus::Editor => self.handle_editor_input(key).await,
             Focus::Results => self.handle_results_input(key).await,
             Focus::Help => self.handle_help_input(key).await,
+            Focus::TableInspector => self.handle_table_inspector_input(key).await,
+            Focus::ExportPicker => self.handle_export_input(key).await,
         }
     }
 
@@ -733,6 +812,9 @@ impl App {
                 self.focus = Focus::ConnectionDialog;
                 self.connection_dialog.active = true;
             }
+            KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_table_inspector().await;
+            }
             _ => {}
         }
         Ok(())
@@ -819,13 +901,33 @@ impl App {
             KeyCode::Char('a') if ctrl => {
                 self.editor.select_all();
             }
+            KeyCode::Char('z') if ctrl && shift => {
+                self.editor.redo();
+            }
             KeyCode::Char('z') if ctrl => {
-                // Undo (not implemented yet)
+                self.editor.undo();
+            }
+            KeyCode::Char('y') if ctrl => {
+                self.editor.redo();
             }
             KeyCode::Char('l') if ctrl => {
                 self.editor.clear();
                 self.autocomplete.active = false;
             }
+            // Pane resizing: Ctrl+Shift+Up/Down
+            KeyCode::Up if ctrl && shift => {
+                // Make editor smaller / results bigger
+                if self.editor_height_percent > 15 {
+                    self.editor_height_percent -= 5;
+                }
+            }
+            KeyCode::Down if ctrl && shift => {
+                // Make editor bigger / results smaller
+                if self.editor_height_percent < 85 {
+                    self.editor_height_percent += 5;
+                }
+            }
+            // History navigation: Ctrl+Up/Down
             KeyCode::Up if ctrl => {
                 if let Some(entry) = self.query_history.previous() {
                     self.editor.set_text(&entry.query);
@@ -895,14 +997,30 @@ impl App {
 
     async fn handle_results_input(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            // Tab/Shift+Tab for column navigation (Snowflake-style)
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.focus = Focus::Editor;
+                // Shift+Tab: move to previous column
+                if self.result_selected_col > 0 {
+                    self.result_selected_col -= 1;
+                }
             }
             KeyCode::BackTab => {
-                self.focus = Focus::Editor;
+                // BackTab: move to previous column
+                if self.result_selected_col > 0 {
+                    self.result_selected_col -= 1;
+                }
             }
             KeyCode::Tab => {
-                self.focus = Focus::Sidebar;
+                // Tab: move to next column
+                if let Some(result) = self.results.get(self.current_result) {
+                    if self.result_selected_col < result.columns.len().saturating_sub(1) {
+                        self.result_selected_col += 1;
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                // Esc to leave results and go back to editor
+                self.focus = Focus::Editor;
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus = Focus::Editor;
@@ -922,12 +1040,14 @@ impl App {
             KeyCode::Up => {
                 if self.result_selected_row > 0 {
                     self.result_selected_row -= 1;
+                    self.auto_scroll_results();
                 }
             }
             KeyCode::Down => {
                 if let Some(result) = self.results.get(self.current_result) {
                     if self.result_selected_row < result.rows.len().saturating_sub(1) {
                         self.result_selected_row += 1;
+                        self.auto_scroll_results();
                     }
                 }
             }
@@ -941,21 +1061,30 @@ impl App {
             }
             KeyCode::PageUp => {
                 self.result_selected_row = self.result_selected_row.saturating_sub(20);
+                self.auto_scroll_results();
             }
             KeyCode::PageDown => {
                 if let Some(result) = self.results.get(self.current_result) {
                     self.result_selected_row =
                         (self.result_selected_row + 20).min(result.rows.len().saturating_sub(1));
+                    self.auto_scroll_results();
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.copy_selected_cell();
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.results.is_empty() {
+                    self.export_selected = 0;
+                    self.focus = Focus::ExportPicker;
+                }
             }
             KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.current_result > 0 {
                     self.current_result -= 1;
                     self.result_selected_row = 0;
                     self.result_selected_col = 0;
+                    self.result_scroll_y = 0;
                 }
             }
             KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -963,11 +1092,38 @@ impl App {
                     self.current_result += 1;
                     self.result_selected_row = 0;
                     self.result_selected_col = 0;
+                    self.result_scroll_y = 0;
+                }
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Toggle between visual plan and raw text for EXPLAIN results
+                if self
+                    .explain_plans
+                    .get(self.current_result)
+                    .and_then(|p| p.as_ref())
+                    .is_some()
+                {
+                    self.show_visual_plan = !self.show_visual_plan;
+                    self.plan_scroll = 0;
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Keep the selected result row visible by adjusting scroll position.
+    fn auto_scroll_results(&mut self) {
+        if self.result_selected_row < self.result_scroll_y {
+            self.result_scroll_y = self.result_selected_row;
+        }
+        // Use a conservative visible-height estimate; rendering will clamp if needed
+        let estimated_visible = 20_usize;
+        if self.result_selected_row >= self.result_scroll_y + estimated_visible {
+            self.result_scroll_y = self
+                .result_selected_row
+                .saturating_sub(estimated_visible - 1);
+        }
     }
 
     async fn handle_help_input(&mut self, key: KeyEvent) -> Result<()> {
@@ -979,6 +1135,195 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    async fn handle_table_inspector_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.table_inspector = None;
+                self.focus = Focus::Sidebar;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.show_ddl = !inspector.show_ddl;
+                    inspector.scroll = 0;
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(ref inspector) = self.table_inspector {
+                    if inspector.show_ddl {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let _ = clipboard.set_text(&inspector.ddl);
+                            self.set_status(
+                                "DDL copied to clipboard".to_string(),
+                                StatusType::Success,
+                            );
+                        }
+                    }
+                }
+            }
+            KeyCode::Up => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll = inspector.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll = inspector.scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(ref mut inspector) = self.table_inspector {
+                    inspector.scroll += 10;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_export_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.focus = Focus::Results;
+            }
+            KeyCode::Up => {
+                if self.export_selected > 0 {
+                    self.export_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.export_selected < EXPORT_FORMATS.len() - 1 {
+                    self.export_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let format = EXPORT_FORMATS[self.export_selected];
+                self.perform_export(format);
+                self.focus = Focus::Results;
+            }
+            KeyCode::Char(c @ '1'..='5') => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < EXPORT_FORMATS.len() {
+                    let format = EXPORT_FORMATS[idx];
+                    self.perform_export(format);
+                    self.focus = Focus::Results;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn open_table_inspector(&mut self) {
+        if self.sidebar_tab != SidebarTab::Tables || self.connection.client.is_none() {
+            return;
+        }
+
+        // Find the selected table from the sidebar
+        let mut index = 0;
+        let mut target_table: Option<(String, String)> = None;
+
+        for schema in &self.schemas {
+            if index == self.sidebar_selected {
+                // Schema is selected, not a table
+                return;
+            }
+            index += 1;
+
+            if self.expanded_schemas.contains(&schema.name) {
+                for table in &self.tables {
+                    if table.schema == schema.name {
+                        if index == self.sidebar_selected {
+                            target_table = Some((schema.name.clone(), table.name.clone()));
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                if target_table.is_some() {
+                    break;
+                }
+            }
+        }
+
+        let (schema_name, table_name) = match target_table {
+            Some(t) => t,
+            None => return,
+        };
+
+        let client = self.connection.client.as_ref().unwrap();
+
+        let columns = get_columns(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_default();
+        let indexes = get_indexes(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_default();
+        let ddl = get_table_ddl(client, &schema_name, &table_name)
+            .await
+            .unwrap_or_else(|_| "-- DDL generation failed".to_string());
+
+        self.table_inspector = Some(TableInspectorState {
+            table_name,
+            schema_name,
+            columns,
+            indexes,
+            ddl,
+            show_ddl: false,
+            scroll: 0,
+        });
+        self.focus = Focus::TableInspector;
+    }
+
+    fn perform_export(&mut self, format: ExportFormat) {
+        let result = match self.results.get(self.current_result) {
+            Some(r) => r,
+            None => {
+                self.set_status("No results to export".to_string(), StatusType::Warning);
+                return;
+            }
+        };
+
+        let content = match format {
+            ExportFormat::Csv => crate::export::to_csv(result),
+            ExportFormat::Json => crate::export::to_json(result),
+            ExportFormat::SqlInsert => crate::export::to_sql_insert(result, "results"),
+            ExportFormat::Tsv => crate::export::to_tsv(result),
+            ExportFormat::ClipboardCsv => {
+                let csv = crate::export::to_csv(result);
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(&csv);
+                    self.set_status(
+                        format!("Copied {} rows to clipboard", result.row_count),
+                        StatusType::Success,
+                    );
+                } else {
+                    self.set_status("Failed to access clipboard".to_string(), StatusType::Error);
+                }
+                return;
+            }
+        };
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("pgrsql_export_{}.{}", timestamp, format.extension());
+
+        match std::fs::write(&filename, &content) {
+            Ok(()) => {
+                self.set_status(
+                    format!("Exported {} rows to {}", result.row_count, filename),
+                    StatusType::Success,
+                );
+            }
+            Err(e) => {
+                self.set_status(format!("Export failed: {}", e), StatusType::Error);
+            }
+        }
     }
 
     async fn handle_sidebar_select(&mut self) -> Result<()> {
@@ -1150,8 +1495,138 @@ impl App {
         Ok(())
     }
 
+    /// Get the byte offset of the cursor in the full editor text.
+    fn get_cursor_offset(&self) -> usize {
+        let mut offset = 0;
+        for (i, line) in self.editor.lines.iter().enumerate() {
+            if i == self.editor.cursor_y {
+                offset += self.editor.cursor_x;
+                break;
+            }
+            offset += line.len() + 1; // +1 for newline
+        }
+        offset
+    }
+
+    /// Find the query at the current cursor position.
+    /// Splits on `;` while respecting string literals and comments.
+    fn get_query_at_cursor(&self) -> String {
+        let full_text = self.editor.text();
+        let cursor_offset = self.get_cursor_offset();
+
+        let boundaries = Self::find_query_boundaries(&full_text);
+        for (start, end) in &boundaries {
+            if cursor_offset >= *start && cursor_offset <= *end {
+                return full_text[*start..*end].trim().to_string();
+            }
+        }
+
+        // Fallback to full text
+        full_text.trim().to_string()
+    }
+
+    /// Returns (start_line, end_line) of the query block at the cursor,
+    /// for visual highlighting in the editor.
+    pub fn get_current_query_line_range(&self) -> Option<(usize, usize)> {
+        let full_text = self.editor.text();
+        let cursor_offset = self.get_cursor_offset();
+
+        let boundaries = Self::find_query_boundaries(&full_text);
+        for (start, end) in &boundaries {
+            if cursor_offset >= *start && cursor_offset <= *end {
+                // Convert byte offsets to line numbers
+                let start_line = full_text[..*start].matches('\n').count();
+                let end_line = full_text[..*end].matches('\n').count();
+                return Some((start_line, end_line));
+            }
+        }
+        None
+    }
+
+    /// Find all query boundaries in the text, returning (start, end) byte offsets.
+    /// Respects single-quoted strings, double-quoted identifiers, and `--` line comments.
+    fn find_query_boundaries(text: &str) -> Vec<(usize, usize)> {
+        let mut boundaries = Vec::new();
+        let mut start = 0;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let mut byte_pos = 0;
+        let mut i = 0;
+
+        while i < len {
+            let c = chars[i];
+            let c_len = c.len_utf8();
+
+            if in_line_comment {
+                if c == '\n' {
+                    in_line_comment = false;
+                }
+            } else if in_block_comment {
+                if c == '*' && i + 1 < len && chars[i + 1] == '/' {
+                    in_block_comment = false;
+                    i += 1;
+                    byte_pos += chars[i].len_utf8();
+                }
+            } else if in_single_quote {
+                if c == '\'' {
+                    // Handle escaped quotes ('')
+                    if i + 1 < len && chars[i + 1] == '\'' {
+                        i += 1;
+                        byte_pos += chars[i].len_utf8();
+                    } else {
+                        in_single_quote = false;
+                    }
+                }
+            } else if in_double_quote {
+                if c == '"' {
+                    in_double_quote = false;
+                }
+            } else {
+                match c {
+                    '\'' => in_single_quote = true,
+                    '"' => in_double_quote = true,
+                    '-' if i + 1 < len && chars[i + 1] == '-' => {
+                        in_line_comment = true;
+                    }
+                    '/' if i + 1 < len && chars[i + 1] == '*' => {
+                        in_block_comment = true;
+                        i += 1;
+                        byte_pos += chars[i].len_utf8();
+                    }
+                    ';' => {
+                        let end = byte_pos;
+                        if !text[start..end].trim().is_empty() {
+                            boundaries.push((start, end));
+                        }
+                        start = byte_pos + c_len;
+                    }
+                    _ => {}
+                }
+            }
+
+            byte_pos += c_len;
+            i += 1;
+        }
+
+        // Last query (after final `;` or if no `;` at all)
+        if start < text.len() && !text[start..].trim().is_empty() {
+            boundaries.push((start, text.len()));
+        }
+
+        // If empty, treat entire text as one query
+        if boundaries.is_empty() && !text.trim().is_empty() {
+            boundaries.push((0, text.len()));
+        }
+
+        boundaries
+    }
+
     async fn execute_query(&mut self) -> Result<()> {
-        let query = self.editor.text();
+        let query = self.get_query_at_cursor();
         if query.trim().is_empty() {
             return Ok(());
         }
@@ -1197,10 +1672,31 @@ impl App {
                 );
             }
 
+            // Parse EXPLAIN plan if applicable
+            let plan = if is_explain_query(&query) {
+                // Build the text output from the result rows
+                let text: String = result
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.first().map(|cell| cell.display()))
+                    .collect::<Vec<String>>()
+                    .join("\n");
+                parse_explain_output(&text)
+            } else {
+                None
+            };
+
             self.results.push(result);
+            self.explain_plans.push(plan);
             self.current_result = self.results.len() - 1;
             self.result_selected_row = 0;
             self.result_selected_col = 0;
+            self.plan_scroll = 0;
+            self.show_visual_plan = self
+                .explain_plans
+                .last()
+                .map(|p| p.is_some())
+                .unwrap_or(false);
         } else {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }
@@ -1212,10 +1708,10 @@ impl App {
         let line = self.editor.current_line().to_string();
         let cursor_x = self.editor.cursor_x;
 
-        // Extract the word being typed (prefix)
+        // Extract the word being typed (prefix), including dots for schema.table
         let before_cursor = &line[..cursor_x.min(line.len())];
         let prefix_start = before_cursor
-            .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
             .map(|i| i + 1)
             .unwrap_or(0);
         let prefix = &before_cursor[prefix_start..];
@@ -1230,13 +1726,22 @@ impl App {
 
         let mut suggestions: Vec<AutocompleteSuggestion> = Vec::new();
 
-        // Table names from loaded schema
+        // Table names from loaded schema (schema-qualified)
+        let mut seen_tables = std::collections::HashSet::new();
         for table in &self.tables {
-            if table.name.to_lowercase().starts_with(&prefix_lower) {
+            let qualified = format!("{}.{}", table.schema, table.name);
+            if seen_tables.contains(&qualified) {
+                continue;
+            }
+            // Match on bare table name OR schema.table qualified name
+            if table.name.to_lowercase().starts_with(&prefix_lower)
+                || qualified.to_lowercase().starts_with(&prefix_lower)
+            {
                 suggestions.push(AutocompleteSuggestion {
-                    text: table.name.clone(),
+                    text: qualified.clone(),
                     kind: SuggestionKind::Table,
                 });
+                seen_tables.insert(qualified);
             }
         }
 

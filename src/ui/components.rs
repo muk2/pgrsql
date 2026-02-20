@@ -7,8 +7,12 @@ use ratatui::{
 };
 
 use crate::db::SslMode;
+use crate::explain::{
+    format_duration_ms, node_color_class, rows_mismatch, NodeColorClass, PlanNode, QueryPlan,
+};
 use crate::ui::{
-    is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme, SPINNER_FRAMES,
+    is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
+    EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -55,9 +59,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_toasts(frame, app);
     }
 
+    // Draw table inspector if active
+    if app.table_inspector.is_some() {
+        draw_table_inspector(frame, app);
+    }
+
     // Draw connection dialog if active
     if app.connection_dialog.active {
         draw_connection_dialog(frame, app);
+    }
+
+    // Draw export picker if active
+    if app.focus == Focus::ExportPicker {
+        draw_export_picker(frame, app);
     }
 
     // Draw help overlay if active
@@ -280,8 +294,8 @@ fn draw_main_panel(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40), // Editor
-            Constraint::Min(0),         // Results
+            Constraint::Percentage(app.editor_height_percent), // Editor (resizable)
+            Constraint::Min(0),                                // Results
         ])
         .split(area);
 
@@ -318,6 +332,9 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         area,
     );
 
+    // Determine active query range for visual highlighting
+    let query_range = app.get_current_query_line_range();
+
     // Syntax highlight and render editor content
     let visible_height = inner_area.height as usize;
     let lines: Vec<Line> = app
@@ -329,16 +346,19 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(line_idx, line_text)| {
             let actual_line = line_idx + app.editor.scroll_offset;
-            highlight_sql_line(line_text, theme, actual_line, &app.editor)
+            let in_active_query = query_range
+                .map(|(start, end)| actual_line >= start && actual_line <= end)
+                .unwrap_or(false);
+            highlight_sql_line(line_text, theme, actual_line, &app.editor, in_active_query)
         })
         .collect();
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner_area);
 
-    // Show cursor
+    // Show cursor (offset by 2 for gutter prefix)
     if focused {
-        let cursor_x = inner_area.x + app.editor.cursor_x as u16;
+        let cursor_x = inner_area.x + 2 + app.editor.cursor_x as u16;
         let cursor_y = inner_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16;
         if cursor_y < inner_area.y + inner_area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
@@ -346,28 +366,70 @@ fn draw_editor(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// Determine if a line starts inside a block comment by scanning all previous lines.
+fn is_in_block_comment(lines: &[String], current_line: usize) -> bool {
+    let mut depth = 0i32;
+    for line in lines.iter().take(current_line) {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == '/' && chars[i + 1] == '*' {
+                depth += 1;
+                i += 2;
+            } else if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '/' {
+                depth = (depth - 1).max(0);
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    depth > 0
+}
+
 fn highlight_sql_line<'a>(
     line: &'a str,
     theme: &Theme,
     line_number: usize,
     editor: &crate::editor::TextBuffer,
+    in_active_query: bool,
 ) -> Line<'a> {
     let mut spans: Vec<Span> = Vec::new();
     let mut current_word = String::new();
     let mut in_string = false;
     let mut string_char = '"';
-    let in_comment = false;
+    let mut in_block_comment = is_in_block_comment(&editor.lines, line_number);
 
-    for (i, c) in line.char_indices() {
-        // Check for selection
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    // Show a gutter marker for the active query block
+    if in_active_query {
+        spans.push(Span::styled(
+            "\u{2502} ".to_string(), // "│ " vertical bar
+            Style::default().fg(theme.text_accent),
+        ));
+    } else {
+        spans.push(Span::styled(
+            "  ".to_string(),
+            Style::default().fg(theme.text_muted),
+        ));
+    }
+
+    while i < len {
+        let c = chars[i];
+        // Compute byte index for selection check
+        let byte_idx: usize = chars[..i].iter().map(|ch| ch.len_utf8()).sum();
+
         let is_selected = if let Some(((start_x, start_y), (end_x, end_y))) = editor.get_selection()
         {
             if start_y == end_y && line_number == start_y {
-                i >= start_x && i < end_x
+                byte_idx >= start_x && byte_idx < end_x
             } else if line_number == start_y {
-                i >= start_x
+                byte_idx >= start_x
             } else if line_number == end_y {
-                i < end_x
+                byte_idx < end_x
             } else {
                 line_number > start_y && line_number < end_y
             }
@@ -381,22 +443,61 @@ fn highlight_sql_line<'a>(
             Style::default()
         };
 
-        // Handle comments
-        if !in_string && line[i..].starts_with("--") {
+        // Handle block comments
+        if in_block_comment {
+            if i + 1 < len && c == '*' && chars[i + 1] == '/' {
+                spans.push(Span::styled(
+                    "*/".to_string(),
+                    base_style.fg(theme.syntax_comment),
+                ));
+                in_block_comment = false;
+                i += 2;
+            } else {
+                spans.push(Span::styled(
+                    c.to_string(),
+                    base_style.fg(theme.syntax_comment),
+                ));
+                i += 1;
+            }
+            continue;
+        }
+
+        // Start block comment
+        if !in_string && i + 1 < len && c == '/' && chars[i + 1] == '*' {
             if !current_word.is_empty() {
                 spans.push(create_word_span(&current_word, theme, base_style));
                 current_word.clear();
             }
             spans.push(Span::styled(
-                line[i..].to_string(),
+                "/*".to_string(),
                 base_style.fg(theme.syntax_comment),
             ));
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+
+        // Handle line comments
+        if !in_string && i + 1 < len && c == '-' && chars[i + 1] == '-' {
+            if !current_word.is_empty() {
+                spans.push(create_word_span(&current_word, theme, base_style));
+                current_word.clear();
+            }
+            let rest: String = chars[i..].iter().collect();
+            spans.push(Span::styled(rest, base_style.fg(theme.syntax_comment)));
             break;
         }
 
         // Handle strings
-        if (c == '\'' || c == '"') && !in_comment {
+        if (c == '\'' || c == '"') && !in_block_comment {
             if in_string && c == string_char {
+                // Check for escaped quotes ('')
+                if c == '\'' && i + 1 < len && chars[i + 1] == '\'' {
+                    current_word.push(c);
+                    current_word.push(c);
+                    i += 2;
+                    continue;
+                }
                 current_word.push(c);
                 spans.push(Span::styled(
                     current_word.clone(),
@@ -415,12 +516,44 @@ fn highlight_sql_line<'a>(
             } else {
                 current_word.push(c);
             }
+            i += 1;
             continue;
         }
 
         if in_string {
             current_word.push(c);
+            i += 1;
             continue;
+        }
+
+        // Handle PostgreSQL operators: ::, ->, ->>, #>, #>>, @>, <@, ?|, ?&, ||
+        if i + 1 < len {
+            let two_char: String = chars[i..i + 2].iter().collect();
+            let is_pg_operator = matches!(
+                two_char.as_str(),
+                "::" | "->" | "#>" | "@>" | "<@" | "?|" | "?&" | "||" | "!=" | "<>" | ">=" | "<="
+            );
+            if is_pg_operator {
+                if !current_word.is_empty() {
+                    spans.push(create_word_span(&current_word, theme, base_style));
+                    current_word.clear();
+                }
+                // Check for 3-char operators: ->>, #>>
+                if i + 2 < len {
+                    let three_char: String = chars[i..i + 3].iter().collect();
+                    if matches!(three_char.as_str(), "->>" | "#>>") {
+                        spans.push(Span::styled(
+                            three_char,
+                            base_style.fg(theme.syntax_operator),
+                        ));
+                        i += 3;
+                        continue;
+                    }
+                }
+                spans.push(Span::styled(two_char, base_style.fg(theme.syntax_operator)));
+                i += 2;
+                continue;
+            }
         }
 
         // Handle word boundaries
@@ -436,19 +569,24 @@ fn highlight_sql_line<'a>(
             let style = match c {
                 '(' | ')' | '[' | ']' | '{' | '}' => base_style.fg(theme.text_primary),
                 ',' | ';' => base_style.fg(theme.text_secondary),
-                '=' | '>' | '<' | '!' | '+' | '-' | '*' | '/' | '%' => {
-                    base_style.fg(theme.syntax_operator)
-                }
+                '=' | '>' | '<' | '!' | '+' | '-' | '*' | '/' | '%' | '~' | '&' | '|' | '^'
+                | '#' | '@' | '?' => base_style.fg(theme.syntax_operator),
+                ':' => base_style.fg(theme.syntax_operator),
+                '.' => base_style.fg(theme.text_muted),
                 _ => base_style.fg(theme.text_primary),
             };
             spans.push(Span::styled(c.to_string(), style));
         }
+
+        i += 1;
     }
 
     // Handle remaining word
     if !current_word.is_empty() {
         let style = if in_string {
             Style::default().fg(theme.syntax_string)
+        } else if in_block_comment {
+            Style::default().fg(theme.syntax_comment)
         } else {
             Style::default()
         };
@@ -463,9 +601,11 @@ fn create_word_span<'a>(word: &str, theme: &Theme, base_style: Style) -> Span<'a
         base_style
             .fg(theme.syntax_keyword)
             .add_modifier(Modifier::BOLD)
+    } else if is_sql_function(word) {
+        base_style.fg(theme.syntax_function)
     } else if is_sql_type(word) {
         base_style.fg(theme.syntax_type)
-    } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') {
+    } else if word.chars().all(|c| c.is_ascii_digit() || c == '.') && !word.is_empty() {
         base_style.fg(theme.syntax_number)
     } else {
         base_style.fg(theme.text_primary)
@@ -484,9 +624,18 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     };
     let result_total = app.results.len();
 
-    // Build title with execution time and row count
+    // Build title with execution time, row count, and cell position
     let title = if let Some(result) = app.results.get(app.current_result) {
         let time_ms = result.execution_time.as_secs_f64() * 1000.0;
+        let position = if !result.columns.is_empty() && !result.rows.is_empty() {
+            format!(
+                " [R{}/C{}]",
+                app.result_selected_row + 1,
+                app.result_selected_col + 1
+            )
+        } else {
+            String::new()
+        };
         if result.error.is_some() {
             format!(
                 " Results ({}/{}) - ERROR ({:.2}ms) ",
@@ -499,8 +648,13 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
             )
         } else {
             format!(
-                " Results ({}/{}) - {} rows ({:.2}ms) ",
-                result_index, result_total, result.row_count, time_ms
+                " Results ({}/{}) - {} rows x {} cols ({:.2}ms){} ",
+                result_index,
+                result_total,
+                result.row_count,
+                result.columns.len(),
+                time_ms,
+                position
             )
         }
     } else {
@@ -520,7 +674,19 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(result) = app.results.get(app.current_result) {
+    // Check if we should show a visual explain plan
+    let show_plan = app.show_visual_plan
+        && app
+            .explain_plans
+            .get(app.current_result)
+            .and_then(|p| p.as_ref())
+            .is_some();
+
+    if show_plan {
+        if let Some(Some(plan)) = app.explain_plans.get(app.current_result) {
+            draw_explain_plan(frame, app, plan, inner);
+        }
+    } else if let Some(result) = app.results.get(app.current_result) {
         if let Some(error) = &result.error {
             let error_text = Paragraph::new(error.as_str())
                 .style(theme.status_error())
@@ -623,6 +789,174 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         .highlight_style(theme.selected());
 
     frame.render_widget(table, area);
+}
+
+fn draw_explain_plan(frame: &mut Frame, app: &App, plan: &QueryPlan, area: Rect) {
+    let theme = &app.theme;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header with total time
+    let header = if let Some(total) = plan.total_time {
+        format!("Query Plan (total: {})", format_duration_ms(total))
+    } else {
+        "Query Plan".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Render the tree
+    render_plan_node(&plan.root, plan.total_time, theme, &mut lines, "", true);
+
+    // Planning/Execution time footer
+    lines.push(Line::from(""));
+    if let Some(pt) = plan.planning_time {
+        lines.push(Line::from(Span::styled(
+            format!("Planning Time: {}", format_duration_ms(pt)),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+    if let Some(et) = plan.execution_time {
+        lines.push(Line::from(Span::styled(
+            format!("Execution Time: {}", format_duration_ms(et)),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+
+    // Hint
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Ctrl+E: Toggle raw/visual view",
+        Style::default().fg(theme.text_muted),
+    )));
+
+    // Apply scroll
+    let visible_height = area.height as usize;
+    let display_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(app.plan_scroll)
+        .take(visible_height)
+        .collect();
+
+    let paragraph = Paragraph::new(display_lines);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_plan_node<'a>(
+    node: &PlanNode,
+    total_time: Option<f64>,
+    theme: &'a Theme,
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    is_last: bool,
+) {
+    let connector = if prefix.is_empty() {
+        ""
+    } else if is_last {
+        "└─ "
+    } else {
+        "├─ "
+    };
+
+    // Color based on cost
+    let color_class = node_color_class(node, total_time);
+    let node_color = match color_class {
+        NodeColorClass::Fast => theme.success,
+        NodeColorClass::Moderate => theme.warning,
+        NodeColorClass::Slow => theme.error,
+    };
+
+    let check = match color_class {
+        NodeColorClass::Fast => " ✓",
+        NodeColorClass::Moderate => " !",
+        NodeColorClass::Slow => " ✗",
+    };
+
+    // Build the node line
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::styled(
+        format!("{}{}", prefix, connector),
+        Style::default().fg(theme.text_muted),
+    ));
+    spans.push(Span::styled(
+        node.node_type.clone(),
+        Style::default().fg(node_color).add_modifier(Modifier::BOLD),
+    ));
+
+    // Cost info
+    if let Some((start, end)) = node.estimated_cost {
+        spans.push(Span::styled(
+            format!(" (cost={:.2}..{:.2}", start, end),
+            Style::default().fg(theme.text_secondary),
+        ));
+        if let Some(rows) = node.estimated_rows {
+            spans.push(Span::styled(
+                format!(" rows={}", rows),
+                Style::default().fg(theme.text_secondary),
+            ));
+        }
+        spans.push(Span::styled(
+            ")".to_string(),
+            Style::default().fg(theme.text_secondary),
+        ));
+    }
+
+    // Actual time
+    if let Some((start, end)) = node.actual_time {
+        spans.push(Span::styled(
+            format!(" [actual: {}]", format_duration_ms(end - start)),
+            Style::default().fg(node_color),
+        ));
+    }
+
+    // Rows mismatch indicator
+    if rows_mismatch(node) {
+        if let (Some(est), Some(actual)) = (node.estimated_rows, node.actual_rows) {
+            spans.push(Span::styled(
+                format!(" ⚠ est={} actual={}", est, actual),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    spans.push(Span::styled(check, Style::default().fg(node_color)));
+
+    lines.push(Line::from(spans));
+
+    // Details
+    let child_prefix = if prefix.is_empty() {
+        "   ".to_string()
+    } else if is_last {
+        format!("{}   ", prefix)
+    } else {
+        format!("{}│  ", prefix)
+    };
+
+    for detail in &node.details {
+        lines.push(Line::from(Span::styled(
+            format!("{}   {}", child_prefix, detail),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+
+    // Children
+    for (i, child) in node.children.iter().enumerate() {
+        let child_is_last = i == node.children.len() - 1;
+        render_plan_node(
+            child,
+            total_time,
+            theme,
+            lines,
+            &child_prefix,
+            child_is_last,
+        );
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -936,6 +1270,198 @@ fn draw_toasts(frame: &mut Frame, app: &App) {
     }
 }
 
+fn draw_table_inspector(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let inspector = match &app.table_inspector {
+        Some(i) => i,
+        None => return,
+    };
+
+    let area = frame.area();
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = (area.height - 4).min(30);
+    let x = (area.width - width) / 2;
+    let y = (area.height - height) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, dialog_area);
+
+    let title = format!(
+        " Table: {}.{} ",
+        inspector.schema_name, inspector.table_name
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(dialog_area);
+    frame.render_widget(block, dialog_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if inspector.show_ddl {
+        // DDL view
+        for ddl_line in inspector.ddl.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", ddl_line),
+                Style::default().fg(theme.text_primary),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [D] Structure  [Ctrl+C] Copy DDL  [Esc] Close",
+            Style::default().fg(theme.text_muted),
+        )));
+    } else {
+        // Structure view
+        lines.push(Line::from(Span::styled(
+            "  COLUMNS",
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        for col in &inspector.columns {
+            let pk = if col.is_primary_key { " PK" } else { "" };
+            let nullable = if col.is_nullable { "NULL" } else { "NOT NULL" };
+            let default = col
+                .default_value
+                .as_ref()
+                .map(|d| format!(" DEFAULT {}", d))
+                .unwrap_or_default();
+            let line_text = format!(
+                "  {:<20} {:<15} {:<8}{}{}",
+                col.name, col.data_type, nullable, pk, default
+            );
+            let style = if col.is_primary_key {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+            lines.push(Line::from(Span::styled(line_text, style)));
+        }
+
+        if !inspector.indexes.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  INDEXES",
+                Style::default()
+                    .fg(theme.text_accent)
+                    .add_modifier(Modifier::BOLD),
+            )));
+
+            for idx in &inspector.indexes {
+                let kind = if idx.is_primary {
+                    "PRIMARY"
+                } else if idx.is_unique {
+                    "UNIQUE"
+                } else {
+                    ""
+                };
+                let line_text = format!("  {:<30} ({}) {}", idx.name, idx.columns.join(", "), kind);
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(theme.text_primary),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  [D] DDL  [Esc] Close",
+            Style::default().fg(theme.text_muted),
+        )));
+    }
+
+    // Apply scrolling
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(inspector.scroll)
+        .take(inner.height as usize)
+        .collect();
+
+    let paragraph = Paragraph::new(visible);
+    frame.render_widget(paragraph, inner);
+}
+
+fn draw_export_picker(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let row_count = app
+        .results
+        .get(app.current_result)
+        .map(|r| r.row_count)
+        .unwrap_or(0);
+
+    let picker_width = 40.min(area.width.saturating_sub(4));
+    let picker_height = (EXPORT_FORMATS.len() as u16 + 4).min(area.height.saturating_sub(4));
+
+    let picker_x = (area.width - picker_width) / 2;
+    let picker_y = (area.height - picker_height) / 2;
+
+    let picker_area = Rect::new(picker_x, picker_y, picker_width, picker_height);
+    frame.render_widget(Clear, picker_area);
+
+    let title = format!(" Export Results ({} rows) ", row_count);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(picker_area);
+    frame.render_widget(block, picker_area);
+
+    let items: Vec<ListItem> = EXPORT_FORMATS
+        .iter()
+        .enumerate()
+        .map(|(i, fmt)| {
+            let prefix = format!("  {}. ", i + 1);
+            let style = if i == app.export_selected {
+                Style::default()
+                    .fg(theme.text_accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+            ListItem::new(format!("{}{}", prefix, fmt.label())).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    frame.render_widget(list, list_area);
+
+    // Hint text at bottom
+    let hint_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    let hint = Paragraph::new(" Enter: Export | 1-5: Quick select | Esc: Cancel")
+        .style(Style::default().fg(theme.text_muted));
+    frame.render_widget(hint, hint_area);
+}
+
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
@@ -966,10 +1492,13 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   (Sidebar → Editor → Results → ...)",
         "",
         " EDITOR",
-        "   F5/Ctrl+Enter  Execute query",
+        "   F5/Ctrl+Enter  Execute query at cursor",
         "   Ctrl+L         Clear editor",
         "   Ctrl+↑/↓       Navigate history",
+        "   Ctrl+Shift+↑/↓ Resize editor/results",
         "   Ctrl+C/X/V     Copy/Cut/Paste",
+        "   Ctrl+Z         Undo",
+        "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Ctrl+Space     Trigger autocomplete",
         "   Tab            Insert spaces",
@@ -978,10 +1507,15 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   1/2/3          Switch tabs",
         "   Enter          Select item",
         "   ↑/↓            Navigate",
+        "   Ctrl+I         Inspect table (DDL)",
         "",
         " RESULTS",
+        "   Tab/Shift+Tab  Next/Prev column",
         "   Arrow keys     Navigate cells",
+        "   Esc            Back to editor",
         "   Ctrl+C         Copy cell value",
+        "   Ctrl+E         Toggle EXPLAIN plan view",
+        "   Ctrl+S         Export results",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
         "",
