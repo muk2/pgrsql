@@ -7,6 +7,9 @@ use ratatui::{
 };
 
 use crate::db::SslMode;
+use crate::explain::{
+    format_duration_ms, node_color_class, rows_mismatch, NodeColorClass, PlanNode, QueryPlan,
+};
 use crate::ui::{
     is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
     EXPORT_FORMATS, SPINNER_FRAMES,
@@ -37,6 +40,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     // Draw status bar
     draw_status_bar(frame, app, chunks[2]);
+
+    // Draw autocomplete popup (positioned relative to editor cursor)
+    if app.autocomplete.active && app.focus == Focus::Editor {
+        // Compute the editor inner area to position the popup
+        let editor_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Min(0)])
+            .split(main_chunks[1]);
+        let editor_inner = Block::default()
+            .borders(Borders::ALL)
+            .inner(editor_chunks[0]);
+        draw_autocomplete(frame, app, editor_inner);
+    }
 
     // Draw toasts
     if !app.show_help {
@@ -658,7 +674,19 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(result) = app.results.get(app.current_result) {
+    // Check if we should show a visual explain plan
+    let show_plan = app.show_visual_plan
+        && app
+            .explain_plans
+            .get(app.current_result)
+            .and_then(|p| p.as_ref())
+            .is_some();
+
+    if show_plan {
+        if let Some(Some(plan)) = app.explain_plans.get(app.current_result) {
+            draw_explain_plan(frame, app, plan, inner);
+        }
+    } else if let Some(result) = app.results.get(app.current_result) {
         if let Some(error) = &result.error {
             let error_text = Paragraph::new(error.as_str())
                 .style(theme.status_error())
@@ -761,6 +789,174 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         .highlight_style(theme.selected());
 
     frame.render_widget(table, area);
+}
+
+fn draw_explain_plan(frame: &mut Frame, app: &App, plan: &QueryPlan, area: Rect) {
+    let theme = &app.theme;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header with total time
+    let header = if let Some(total) = plan.total_time {
+        format!("Query Plan (total: {})", format_duration_ms(total))
+    } else {
+        "Query Plan".to_string()
+    };
+    lines.push(Line::from(Span::styled(
+        header,
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    // Render the tree
+    render_plan_node(&plan.root, plan.total_time, theme, &mut lines, "", true);
+
+    // Planning/Execution time footer
+    lines.push(Line::from(""));
+    if let Some(pt) = plan.planning_time {
+        lines.push(Line::from(Span::styled(
+            format!("Planning Time: {}", format_duration_ms(pt)),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+    if let Some(et) = plan.execution_time {
+        lines.push(Line::from(Span::styled(
+            format!("Execution Time: {}", format_duration_ms(et)),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+
+    // Hint
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Ctrl+E: Toggle raw/visual view",
+        Style::default().fg(theme.text_muted),
+    )));
+
+    // Apply scroll
+    let visible_height = area.height as usize;
+    let display_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(app.plan_scroll)
+        .take(visible_height)
+        .collect();
+
+    let paragraph = Paragraph::new(display_lines);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_plan_node<'a>(
+    node: &PlanNode,
+    total_time: Option<f64>,
+    theme: &'a Theme,
+    lines: &mut Vec<Line<'a>>,
+    prefix: &str,
+    is_last: bool,
+) {
+    let connector = if prefix.is_empty() {
+        ""
+    } else if is_last {
+        "└─ "
+    } else {
+        "├─ "
+    };
+
+    // Color based on cost
+    let color_class = node_color_class(node, total_time);
+    let node_color = match color_class {
+        NodeColorClass::Fast => theme.success,
+        NodeColorClass::Moderate => theme.warning,
+        NodeColorClass::Slow => theme.error,
+    };
+
+    let check = match color_class {
+        NodeColorClass::Fast => " ✓",
+        NodeColorClass::Moderate => " !",
+        NodeColorClass::Slow => " ✗",
+    };
+
+    // Build the node line
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::styled(
+        format!("{}{}", prefix, connector),
+        Style::default().fg(theme.text_muted),
+    ));
+    spans.push(Span::styled(
+        node.node_type.clone(),
+        Style::default().fg(node_color).add_modifier(Modifier::BOLD),
+    ));
+
+    // Cost info
+    if let Some((start, end)) = node.estimated_cost {
+        spans.push(Span::styled(
+            format!(" (cost={:.2}..{:.2}", start, end),
+            Style::default().fg(theme.text_secondary),
+        ));
+        if let Some(rows) = node.estimated_rows {
+            spans.push(Span::styled(
+                format!(" rows={}", rows),
+                Style::default().fg(theme.text_secondary),
+            ));
+        }
+        spans.push(Span::styled(
+            ")".to_string(),
+            Style::default().fg(theme.text_secondary),
+        ));
+    }
+
+    // Actual time
+    if let Some((start, end)) = node.actual_time {
+        spans.push(Span::styled(
+            format!(" [actual: {}]", format_duration_ms(end - start)),
+            Style::default().fg(node_color),
+        ));
+    }
+
+    // Rows mismatch indicator
+    if rows_mismatch(node) {
+        if let (Some(est), Some(actual)) = (node.estimated_rows, node.actual_rows) {
+            spans.push(Span::styled(
+                format!(" ⚠ est={} actual={}", est, actual),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    spans.push(Span::styled(check, Style::default().fg(node_color)));
+
+    lines.push(Line::from(spans));
+
+    // Details
+    let child_prefix = if prefix.is_empty() {
+        "   ".to_string()
+    } else if is_last {
+        format!("{}   ", prefix)
+    } else {
+        format!("{}│  ", prefix)
+    };
+
+    for detail in &node.details {
+        lines.push(Line::from(Span::styled(
+            format!("{}   {}", child_prefix, detail),
+            Style::default().fg(theme.text_secondary),
+        )));
+    }
+
+    // Children
+    for (i, child) in node.children.iter().enumerate() {
+        let child_is_last = i == node.children.len() - 1;
+        render_plan_node(
+            child,
+            total_time,
+            theme,
+            lines,
+            &child_prefix,
+            child_is_last,
+        );
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -1305,6 +1501,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Ctrl+Shift+F   Format SQL",
+        "   Ctrl+Space     Trigger autocomplete",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
@@ -1318,6 +1515,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Arrow keys     Navigate cells",
         "   Esc            Back to editor",
         "   Ctrl+C         Copy cell value",
+        "   Ctrl+E         Toggle EXPLAIN plan view",
         "   Ctrl+S         Export results",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
@@ -1344,4 +1542,67 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         .style(Style::default().bg(theme.bg_primary));
 
     frame.render_widget(help, help_area);
+}
+
+fn draw_autocomplete(frame: &mut Frame, app: &App, editor_area: Rect) {
+    let theme = &app.theme;
+    let ac = &app.autocomplete;
+
+    if ac.suggestions.is_empty() {
+        return;
+    }
+
+    // Position popup below the cursor
+    let cursor_x = editor_area.x + app.editor.cursor_x as u16;
+    let cursor_y = editor_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16 + 1;
+
+    let max_items = ac.suggestions.len().min(8);
+    let popup_width = 35.min(editor_area.width.saturating_sub(2));
+    let popup_height = (max_items as u16 + 2).min(editor_area.height.saturating_sub(2));
+
+    // Adjust position if popup would go off screen
+    let popup_x = cursor_x.min(frame.area().width.saturating_sub(popup_width));
+    let popup_y = if cursor_y + popup_height > frame.area().height {
+        // Show above cursor if no room below
+        cursor_y.saturating_sub(popup_height + 1)
+    } else {
+        cursor_y
+    };
+
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let items: Vec<ListItem> = ac
+        .suggestions
+        .iter()
+        .enumerate()
+        .take(max_items)
+        .map(|(i, suggestion)| {
+            let is_selected = i == ac.selected;
+            let kind_label = suggestion.kind.label();
+
+            let text = format!(" {} {:>2} ", suggestion.text, kind_label);
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.text_accent)
+                    .bg(theme.bg_highlight)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
 }

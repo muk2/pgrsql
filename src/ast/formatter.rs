@@ -308,12 +308,7 @@ fn format_expr(expr: &Expression) -> String {
         } => {
             let not_str = if *negated { "NOT " } else { "" };
             let items: Vec<String> = list.iter().map(format_expr).collect();
-            format!(
-                "{} {}IN ({})",
-                format_expr(expr),
-                not_str,
-                items.join(", ")
-            )
+            format!("{} {}IN ({})", format_expr(expr), not_str, items.join(", "))
         }
         Expression::InSubquery {
             expr,
@@ -610,9 +605,8 @@ mod tests {
 
     #[test]
     fn test_format_group_by_having() {
-        let result = format_roundtrip(
-            "SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) > 5",
-        );
+        let result =
+            format_roundtrip("SELECT dept, COUNT(*) FROM emp GROUP BY dept HAVING COUNT(*) > 5");
         assert!(result.contains("GROUP BY"));
         assert!(result.contains("HAVING"));
     }
@@ -717,9 +711,8 @@ mod tests {
 
     #[test]
     fn test_format_subquery() {
-        let result = format_roundtrip(
-            "SELECT * FROM users WHERE id IN (SELECT user_id FROM active_users)",
-        );
+        let result =
+            format_roundtrip("SELECT * FROM users WHERE id IN (SELECT user_id FROM active_users)");
         assert!(result.contains("IN ("));
     }
 }
