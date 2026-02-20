@@ -109,12 +109,23 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let has_filter = !app.sidebar_filter.is_empty() || app.sidebar_filter_active;
+    let constraints: Vec<Constraint> = if has_filter {
+        vec![
+            Constraint::Length(3), // Tabs
+            Constraint::Length(1), // Filter bar
+            Constraint::Min(0),    // Content
+        ]
+    } else {
+        vec![
             Constraint::Length(3), // Tabs
             Constraint::Min(0),    // Content
-        ])
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     // Draw tabs
@@ -141,11 +152,28 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(tabs, chunks[0]);
 
+    // Draw filter bar if active
+    if has_filter {
+        let filter_text = if app.sidebar_filter.is_empty() {
+            " / type to filter...".to_string()
+        } else {
+            format!(" /{}", app.sidebar_filter)
+        };
+        let filter_style = if app.sidebar_filter_active {
+            Style::default().fg(theme.text_accent).bg(theme.bg_secondary)
+        } else {
+            Style::default().fg(theme.text_secondary).bg(theme.bg_secondary)
+        };
+        let filter_bar = Paragraph::new(filter_text).style(filter_style);
+        frame.render_widget(filter_bar, chunks[1]);
+    }
+
     // Draw content based on selected tab
+    let content_area = *chunks.last().unwrap();
     match app.sidebar_tab {
-        SidebarTab::Databases => draw_databases_list(frame, app, chunks[1]),
-        SidebarTab::Tables => draw_tables_tree(frame, app, chunks[1]),
-        SidebarTab::History => draw_history_list(frame, app, chunks[1]),
+        SidebarTab::Databases => draw_databases_list(frame, app, content_area),
+        SidebarTab::Tables => draw_tables_tree(frame, app, content_area),
+        SidebarTab::History => draw_history_list(frame, app, content_area),
     }
 }
 
@@ -156,6 +184,7 @@ fn draw_databases_list(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .databases
         .iter()
+        .filter(|db| app.matches_sidebar_filter(&db.name))
         .enumerate()
         .map(|(i, db)| {
             let style = if i == app.sidebar_selected {
@@ -198,6 +227,17 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         let expanded = app.expanded_schemas.contains(&schema.name);
         let icon = if expanded { "▼" } else { "▶" };
 
+        // Skip schemas with no matching tables when filter is active
+        let schema_has_matches = app.sidebar_filter.is_empty()
+            || app.matches_sidebar_filter(&schema.name)
+            || app.tables.iter().any(|t| {
+                t.schema == schema.name && app.matches_sidebar_filter(&t.name)
+            });
+
+        if !schema_has_matches {
+            continue;
+        }
+
         let style = if index == app.sidebar_selected {
             theme.selected()
         } else {
@@ -210,6 +250,14 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         if expanded {
             for table in &app.tables {
                 if table.schema == schema.name {
+                    // Apply filter
+                    if !app.sidebar_filter.is_empty()
+                        && !app.matches_sidebar_filter(&table.name)
+                        && !app.matches_sidebar_filter(&schema.name)
+                    {
+                        continue;
+                    }
+
                     let table_icon = match table.table_type {
                         crate::db::TableType::Table => "󰓫",
                         crate::db::TableType::View => "󰈈",
@@ -255,6 +303,7 @@ fn draw_history_list(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = entries
         .iter()
         .rev()
+        .filter(|entry| app.matches_sidebar_filter(&entry.query))
         .enumerate()
         .map(|(i, entry)| {
             let status_icon = if entry.success { "✓" } else { "✗" };
@@ -1507,6 +1556,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   1/2/3          Switch tabs",
         "   Enter          Select item",
         "   ↑/↓            Navigate",
+        "   /              Search/filter",
+        "   Esc            Clear filter",
         "   Ctrl+I         Inspect table (DDL)",
         "",
         " RESULTS",
