@@ -199,13 +199,9 @@ fn bench_optimization(c: &mut Criterion) {
 
     for (name, sql) in &cases {
         let ast = parse_single(sql).unwrap();
-        group.bench_with_input(
-            BenchmarkId::new("optimize", name),
-            &ast,
-            |b, ast| {
-                b.iter(|| optimizer.optimize(black_box(ast.clone())).unwrap());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("optimize", name), &ast, |b, ast| {
+            b.iter(|| optimizer.optimize(black_box(ast.clone())).unwrap());
+        });
     }
 
     group.finish();
@@ -270,10 +266,7 @@ fn bench_explain_parsing(c: &mut Criterion) {
     });
 
     // Larger explain plan
-    let large_plan = format!(
-        "{}\n{}\n{}",
-        EXPLAIN_OUTPUT, EXPLAIN_OUTPUT, EXPLAIN_OUTPUT
-    );
+    let large_plan = format!("{}\n{}\n{}", EXPLAIN_OUTPUT, EXPLAIN_OUTPUT, EXPLAIN_OUTPUT);
     group.bench_function("parse_explain_plan_large", |b| {
         b.iter(|| parse_explain_output(black_box(&large_plan)));
     });
