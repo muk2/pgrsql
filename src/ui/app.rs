@@ -1651,7 +1651,7 @@ impl App {
 
             // Update status
             if let Some(err) = &result.error {
-                self.set_status(format!("Error: {}", err), StatusType::Error);
+                self.set_status(format!("{}: {}", err.category, err.message), StatusType::Error);
             } else if let Some(affected) = result.affected_rows {
                 self.set_status(
                     format!(
