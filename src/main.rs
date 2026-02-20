@@ -1,5 +1,3 @@
-use pgrsql::db::ConnectionManager;
-use pgrsql::ui::App;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -9,6 +7,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use pgrsql::db::ConnectionManager;
+use pgrsql::ui::App;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 

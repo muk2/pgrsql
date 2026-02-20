@@ -43,9 +43,8 @@ use crate::explain;
 ///     ValueError: If the SQL cannot be parsed.
 #[pyfunction]
 fn parse_sql(sql: &str) -> PyResult<Vec<String>> {
-    let queries = ast_parse_sql(sql).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e))
-    })?;
+    let queries = ast_parse_sql(sql)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e)))?;
     Ok(queries.iter().map(compile).collect())
 }
 
@@ -61,9 +60,8 @@ fn parse_sql(sql: &str) -> PyResult<Vec<String>> {
 ///     ValueError: If the SQL cannot be parsed or contains multiple statements.
 #[pyfunction]
 fn format_sql(sql: &str) -> PyResult<String> {
-    let query = crate::ast::parse_single(sql).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e))
-    })?;
+    let query = crate::ast::parse_single(sql)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e)))?;
     let optimizer = Optimizer::with_defaults();
     let optimized = optimizer.optimize(query).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("Optimization error: {}", e))
@@ -86,9 +84,8 @@ fn format_sql(sql: &str) -> PyResult<String> {
 ///     ValueError: If the SQL cannot be parsed.
 #[pyfunction]
 fn analyze_query(py: Python<'_>, sql: &str) -> PyResult<Py<PyDict>> {
-    let query = crate::ast::parse_single(sql).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e))
-    })?;
+    let query = crate::ast::parse_single(sql)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("SQL parse error: {}", e)))?;
     let analysis = crate::ast::analyze_query(&query);
 
     let dict = PyDict::new(py);
