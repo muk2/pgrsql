@@ -24,6 +24,7 @@ pub enum Focus {
     Help,
     TableInspector,
     ExportPicker,
+    StatsPanel,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +155,10 @@ pub struct App {
     // Export
     pub export_selected: usize,
 
+    // Query statistics
+    pub query_stats: QueryStats,
+    pub stats_scroll: usize,
+
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
 }
@@ -272,6 +277,47 @@ pub struct AutocompleteState {
     pub suggestions: Vec<AutocompleteSuggestion>,
     pub selected: usize,
     pub prefix: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct QueryStats {
+    pub total_queries: usize,
+    pub successful_queries: usize,
+    pub failed_queries: usize,
+    pub total_time_ms: f64,
+    pub min_time_ms: f64,
+    pub max_time_ms: f64,
+    pub session_queries: usize,
+    pub session_total_time_ms: f64,
+}
+
+impl QueryStats {
+    pub fn avg_time_ms(&self) -> f64 {
+        if self.total_queries == 0 { 0.0 } else { self.total_time_ms / self.total_queries as f64 }
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        if self.total_queries == 0 { 0.0 } else { (self.successful_queries as f64 / self.total_queries as f64) * 100.0 }
+    }
+
+    pub fn session_avg_time_ms(&self) -> f64 {
+        if self.session_queries == 0 { 0.0 } else { self.session_total_time_ms / self.session_queries as f64 }
+    }
+
+    pub fn record_query(&mut self, time_ms: f64, success: bool) {
+        self.total_queries += 1;
+        self.session_queries += 1;
+        self.total_time_ms += time_ms;
+        self.session_total_time_ms += time_ms;
+        if success { self.successful_queries += 1; } else { self.failed_queries += 1; }
+        if self.total_queries == 1 {
+            self.min_time_ms = time_ms;
+            self.max_time_ms = time_ms;
+        } else {
+            if time_ms < self.min_time_ms { self.min_time_ms = time_ms; }
+            if time_ms > self.max_time_ms { self.max_time_ms = time_ms; }
+        }
+    }
 }
 
 pub const SQL_FUNCTIONS: &[&str] = &[
@@ -418,6 +464,8 @@ impl App {
 
             table_inspector: None,
             export_selected: 0,
+            query_stats: QueryStats::default(),
+            stats_scroll: 0,
             pending_connection: None,
         }
     }
@@ -504,6 +552,7 @@ impl App {
             Focus::Help => self.handle_help_input(key).await,
             Focus::TableInspector => self.handle_table_inspector_input(key).await,
             Focus::ExportPicker => self.handle_export_input(key).await,
+            Focus::StatsPanel => self.handle_stats_input(key).await,
         }
     }
 
@@ -914,6 +963,10 @@ impl App {
                 self.editor.clear();
                 self.autocomplete.active = false;
             }
+            KeyCode::Char('S') if ctrl => {
+                self.focus = Focus::StatsPanel;
+                self.stats_scroll = 0;
+            }
             // Pane resizing: Ctrl+Shift+Up/Down
             KeyCode::Up if ctrl && shift => {
                 // Make editor smaller / results bigger
@@ -1214,6 +1267,22 @@ impl App {
                     self.perform_export(format);
                     self.focus = Focus::Results;
                 }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_stats_input(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.focus = Focus::Editor;
+            }
+            KeyCode::Up => {
+                self.stats_scroll = self.stats_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.stats_scroll += 1;
             }
             _ => {}
         }
@@ -1649,6 +1718,10 @@ impl App {
             self.query_history.add(entry);
             let _ = self.query_history.save();
 
+            // Record query statistics
+            let time_ms = result.execution_time.as_secs_f64() * 1000.0;
+            self.query_stats.record_query(time_ms, result.error.is_none());
+
             // Update status
             if let Some(err) = &result.error {
                 self.set_status(format!("Error: {}", err), StatusType::Error);
@@ -1889,5 +1962,43 @@ fn dialog_field_len(config: &ConnectionConfig, field_index: usize) -> usize {
         4 => config.username.len(),
         5 => config.password.len(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_stats_default() {
+        let stats = QueryStats::default();
+        assert_eq!(stats.total_queries, 0);
+        assert_eq!(stats.avg_time_ms(), 0.0);
+        assert_eq!(stats.success_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_query_stats_record() {
+        let mut stats = QueryStats::default();
+        stats.record_query(100.0, true);
+        stats.record_query(200.0, true);
+        stats.record_query(50.0, false);
+        assert_eq!(stats.total_queries, 3);
+        assert_eq!(stats.successful_queries, 2);
+        assert_eq!(stats.failed_queries, 1);
+        assert!((stats.avg_time_ms() - 116.666).abs() < 1.0);
+        assert!((stats.success_rate() - 66.666).abs() < 1.0);
+        assert_eq!(stats.min_time_ms, 50.0);
+        assert_eq!(stats.max_time_ms, 200.0);
+    }
+
+    #[test]
+    fn test_query_stats_session() {
+        let mut stats = QueryStats::default();
+        stats.record_query(100.0, true);
+        stats.record_query(200.0, true);
+        assert_eq!(stats.session_queries, 2);
+        assert_eq!(stats.session_total_time_ms, 300.0);
+        assert_eq!(stats.session_avg_time_ms(), 150.0);
     }
 }
