@@ -335,6 +335,12 @@ pub const SQL_FUNCTIONS: &[&str] = &[
     "PG_RELATION_SIZE",
 ];
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let query_history = QueryHistory::load().unwrap_or_default();
