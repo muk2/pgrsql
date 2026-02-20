@@ -858,9 +858,7 @@ fn draw_structured_error(
         lines.push(Line::from(vec![
             Span::styled(
                 " Hint: ",
-                Style::default()
-                    .fg(theme.info)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
             ),
             Span::styled(hint.clone(), Style::default().fg(theme.text_primary)),
         ]));
@@ -885,10 +883,7 @@ fn draw_structured_error(
                     .fg(theme.text_secondary)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                parts.join("."),
-                Style::default().fg(theme.text_primary),
-            ),
+            Span::styled(parts.join("."), Style::default().fg(theme.text_primary)),
         ]));
     }
 
@@ -901,10 +896,7 @@ fn draw_structured_error(
                     .fg(theme.text_secondary)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                constraint.clone(),
-                Style::default().fg(theme.text_primary),
-            ),
+            Span::styled(constraint.clone(), Style::default().fg(theme.text_primary)),
         ]));
     }
 
