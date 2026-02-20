@@ -160,9 +160,13 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             format!(" /{}", app.sidebar_filter)
         };
         let filter_style = if app.sidebar_filter_active {
-            Style::default().fg(theme.text_accent).bg(theme.bg_secondary)
+            Style::default()
+                .fg(theme.text_accent)
+                .bg(theme.bg_secondary)
         } else {
-            Style::default().fg(theme.text_secondary).bg(theme.bg_secondary)
+            Style::default()
+                .fg(theme.text_secondary)
+                .bg(theme.bg_secondary)
         };
         let filter_bar = Paragraph::new(filter_text).style(filter_style);
         frame.render_widget(filter_bar, chunks[1]);
@@ -230,9 +234,10 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         // Skip schemas with no matching tables when filter is active
         let schema_has_matches = app.sidebar_filter.is_empty()
             || app.matches_sidebar_filter(&schema.name)
-            || app.tables.iter().any(|t| {
-                t.schema == schema.name && app.matches_sidebar_filter(&t.name)
-            });
+            || app
+                .tables
+                .iter()
+                .any(|t| t.schema == schema.name && app.matches_sidebar_filter(&t.name));
 
         if !schema_has_matches {
             continue;
