@@ -62,6 +62,18 @@ sqlparser = "0.53"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Python bindings (optional)
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+
+[features]
+default = []
+python = ["pyo3"]
+
+[lib]
+name = "pgrsql"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
 [[bin]]
 name = "pgrsql"
 path = "src/main.rs"
