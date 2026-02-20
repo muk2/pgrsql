@@ -1518,7 +1518,10 @@ fn draw_stats_panel(frame: &mut Frame, app: &App) {
         Style::default().fg(theme.text_primary),
     )));
     lines.push(Line::from(Span::styled(
-        format!("   Avg time:          {:.2} ms", stats.session_avg_time_ms()),
+        format!(
+            "   Avg time:          {:.2} ms",
+            stats.session_avg_time_ms()
+        ),
         Style::default().fg(theme.text_primary),
     )));
     lines.push(Line::from(""));
@@ -1560,10 +1563,7 @@ fn draw_stats_panel(frame: &mut Frame, app: &App) {
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!(
-            "   Total time:        {:.2} ms",
-            stats.total_time_ms
-        ),
+        format!("   Total time:        {:.2} ms", stats.total_time_ms),
         Style::default().fg(theme.text_primary),
     )));
     lines.push(Line::from(""));

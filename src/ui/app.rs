@@ -293,15 +293,27 @@ pub struct QueryStats {
 
 impl QueryStats {
     pub fn avg_time_ms(&self) -> f64 {
-        if self.total_queries == 0 { 0.0 } else { self.total_time_ms / self.total_queries as f64 }
+        if self.total_queries == 0 {
+            0.0
+        } else {
+            self.total_time_ms / self.total_queries as f64
+        }
     }
 
     pub fn success_rate(&self) -> f64 {
-        if self.total_queries == 0 { 0.0 } else { (self.successful_queries as f64 / self.total_queries as f64) * 100.0 }
+        if self.total_queries == 0 {
+            0.0
+        } else {
+            (self.successful_queries as f64 / self.total_queries as f64) * 100.0
+        }
     }
 
     pub fn session_avg_time_ms(&self) -> f64 {
-        if self.session_queries == 0 { 0.0 } else { self.session_total_time_ms / self.session_queries as f64 }
+        if self.session_queries == 0 {
+            0.0
+        } else {
+            self.session_total_time_ms / self.session_queries as f64
+        }
     }
 
     pub fn record_query(&mut self, time_ms: f64, success: bool) {
@@ -309,13 +321,21 @@ impl QueryStats {
         self.session_queries += 1;
         self.total_time_ms += time_ms;
         self.session_total_time_ms += time_ms;
-        if success { self.successful_queries += 1; } else { self.failed_queries += 1; }
+        if success {
+            self.successful_queries += 1;
+        } else {
+            self.failed_queries += 1;
+        }
         if self.total_queries == 1 {
             self.min_time_ms = time_ms;
             self.max_time_ms = time_ms;
         } else {
-            if time_ms < self.min_time_ms { self.min_time_ms = time_ms; }
-            if time_ms > self.max_time_ms { self.max_time_ms = time_ms; }
+            if time_ms < self.min_time_ms {
+                self.min_time_ms = time_ms;
+            }
+            if time_ms > self.max_time_ms {
+                self.max_time_ms = time_ms;
+            }
         }
     }
 }
@@ -1720,7 +1740,8 @@ impl App {
 
             // Record query statistics
             let time_ms = result.execution_time.as_secs_f64() * 1000.0;
-            self.query_stats.record_query(time_ms, result.error.is_none());
+            self.query_stats
+                .record_query(time_ms, result.error.is_none());
 
             // Update status
             if let Some(err) = &result.error {
