@@ -12,7 +12,7 @@ use crate::explain::{
 };
 use crate::ui::{
     is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
-    EXPORT_FORMATS, SPINNER_FRAMES,
+    TransactionState, EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -74,6 +74,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_export_picker(frame, app);
     }
 
+    // Draw stats panel if active
+    if app.focus == Focus::StatsPanel {
+        draw_stats_panel(frame, app);
+    }
+
     // Draw help overlay if active
     if app.show_help {
         draw_help_overlay(frame, app);
@@ -83,12 +88,22 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
+    let txn_indicator = if app.transaction_state == TransactionState::Active {
+        let duration = app.transaction_start
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        format!(" | [TXN ACTIVE {}s, {} queries]", duration, app.transaction_query_count)
+    } else {
+        String::new()
+    };
+
     let connection_info = if app.connection.is_connected() {
         format!(
-            " {} | {} | {} ",
+            " {} | {} | {}{}",
             app.connection.config.display_string(),
             app.connection.current_database,
-            app.connection.current_schema
+            app.connection.current_schema,
+            txn_indicator
         )
     } else {
         " Not Connected ".to_string()
@@ -100,7 +115,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         " ".repeat(area.width.saturating_sub(connection_info.len() as u16 + 10) as usize)
     );
 
-    let header = Paragraph::new(header_text).style(theme.header());
+    let header_style = if app.transaction_state == TransactionState::Active {
+        Style::default()
+            .fg(theme.bg_primary)
+            .bg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme.header()
+    };
+    let header = Paragraph::new(header_text).style(header_style);
 
     frame.render_widget(header, area);
 }
@@ -109,12 +132,22 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
     let focused = app.focus == Focus::Sidebar;
 
+    let has_filter = !app.sidebar_filter.is_empty() || app.sidebar_filter_active;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Tabs
-            Constraint::Min(0),    // Content
-        ])
+        .constraints(if has_filter {
+            vec![
+                Constraint::Length(3), // Tabs
+                Constraint::Length(1), // Filter bar
+                Constraint::Min(0),    // Content
+            ]
+        } else {
+            vec![
+                Constraint::Length(3), // Tabs
+                Constraint::Length(0), // No filter bar
+                Constraint::Min(0),    // Content
+            ]
+        })
         .split(area);
 
     // Draw tabs
@@ -141,11 +174,28 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 
     frame.render_widget(tabs, chunks[0]);
 
+    // Draw filter bar
+    if has_filter {
+        let filter_text = if app.sidebar_filter.is_empty() {
+            " / type to filter...".to_string()
+        } else {
+            format!(" /{}", app.sidebar_filter)
+        };
+        let filter_style = if app.sidebar_filter_active {
+            Style::default().fg(theme.text_accent).bg(theme.bg_secondary)
+        } else {
+            Style::default().fg(theme.text_secondary).bg(theme.bg_secondary)
+        };
+        let filter_bar = Paragraph::new(filter_text).style(filter_style);
+        frame.render_widget(filter_bar, chunks[1]);
+    }
+
     // Draw content based on selected tab
+    let content_area = *chunks.last().unwrap();
     match app.sidebar_tab {
-        SidebarTab::Databases => draw_databases_list(frame, app, chunks[1]),
-        SidebarTab::Tables => draw_tables_tree(frame, app, chunks[1]),
-        SidebarTab::History => draw_history_list(frame, app, chunks[1]),
+        SidebarTab::Databases => draw_databases_list(frame, app, content_area),
+        SidebarTab::Tables => draw_tables_tree(frame, app, content_area),
+        SidebarTab::History => draw_history_list(frame, app, content_area),
     }
 }
 
@@ -156,6 +206,7 @@ fn draw_databases_list(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .databases
         .iter()
+        .filter(|db| app.matches_sidebar_filter(&db.name))
         .enumerate()
         .map(|(i, db)| {
             let style = if i == app.sidebar_selected {
@@ -198,6 +249,17 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         let expanded = app.expanded_schemas.contains(&schema.name);
         let icon = if expanded { "▼" } else { "▶" };
 
+        // Check if any tables in this schema match the filter
+        let schema_has_matches = app.sidebar_filter.is_empty()
+            || app.matches_sidebar_filter(&schema.name)
+            || app.tables.iter().any(|t| {
+                t.schema == schema.name && app.matches_sidebar_filter(&t.name)
+            });
+
+        if !schema_has_matches {
+            continue;
+        }
+
         let style = if index == app.sidebar_selected {
             theme.selected()
         } else {
@@ -210,6 +272,14 @@ fn draw_tables_tree(frame: &mut Frame, app: &App, area: Rect) {
         if expanded {
             for table in &app.tables {
                 if table.schema == schema.name {
+                    // Apply filter
+                    if !app.sidebar_filter.is_empty()
+                        && !app.matches_sidebar_filter(&table.name)
+                        && !app.matches_sidebar_filter(&schema.name)
+                    {
+                        continue;
+                    }
+
                     let table_icon = match table.table_type {
                         crate::db::TableType::Table => "󰓫",
                         crate::db::TableType::View => "󰈈",
@@ -255,6 +325,7 @@ fn draw_history_list(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = entries
         .iter()
         .rev()
+        .filter(|entry| app.matches_sidebar_filter(&entry.query))
         .enumerate()
         .map(|(i, entry)| {
             let status_icon = if entry.success { "✓" } else { "✗" };
@@ -981,7 +1052,15 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     // Right section: help hints
-    let right_text = "? Help | Ctrl+Q/D Quit ";
+    let right_text = if app.query_stats.session_queries > 0 {
+        format!(
+            "Queries: {} | Avg: {:.0}ms | ? Help | Ctrl+Q/D Quit ",
+            app.query_stats.session_queries,
+            app.query_stats.session_avg_time_ms()
+        )
+    } else {
+        "? Help | Ctrl+Q/D Quit ".to_string()
+    };
 
     // Calculate padding
     let left_len = left_text.len() as u16;
@@ -1462,6 +1541,128 @@ fn draw_export_picker(frame: &mut Frame, app: &App) {
     frame.render_widget(hint, hint_area);
 }
 
+fn draw_stats_panel(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+    let stats = &app.query_stats;
+
+    let panel_width = 55.min(area.width.saturating_sub(4));
+    let panel_height = 22.min(area.height.saturating_sub(4));
+    let panel_x = (area.width - panel_width) / 2;
+    let panel_y = (area.height - panel_height) / 2;
+    let panel_area = Rect::new(panel_x, panel_y, panel_width, panel_height);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(" Query Statistics (Ctrl+Shift+S) ")
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Session stats
+    lines.push(Line::from(Span::styled(
+        "  SESSION STATISTICS",
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Queries executed:  {}", stats.session_queries),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  Total time:        {:.2}ms",
+            stats.session_total_time_ms
+        ),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  Average time:      {:.2}ms",
+            stats.session_avg_time_ms()
+        ),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(""));
+
+    // Overall stats
+    lines.push(Line::from(Span::styled(
+        "  ALL-TIME STATISTICS",
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Total queries:     {}", stats.total_queries),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Successful:        {}", stats.successful_queries),
+        Style::default().fg(theme.success),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Failed:            {}", stats.failed_queries),
+        Style::default().fg(if stats.failed_queries > 0 {
+            theme.error
+        } else {
+            theme.text_primary
+        }),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  Success rate:      {:.1}%", stats.success_rate()),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("  Average time:      {:.2}ms", stats.avg_time_ms()),
+        Style::default().fg(theme.text_primary),
+    )));
+    if stats.total_queries > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  Min time:          {:.2}ms", stats.min_time_ms),
+            Style::default().fg(theme.success),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  Max time:          {:.2}ms", stats.max_time_ms),
+            Style::default().fg(if stats.max_time_ms > 1000.0 {
+                theme.warning
+            } else {
+                theme.text_primary
+            }),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  [Esc] Close  [↑/↓] Scroll",
+        Style::default().fg(theme.text_muted),
+    )));
+
+    // Apply scroll
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(app.stats_scroll)
+        .take(inner.height as usize)
+        .collect();
+
+    let paragraph = Paragraph::new(visible);
+    frame.render_widget(paragraph, inner);
+}
+
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
@@ -1501,6 +1702,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Ctrl+Space     Trigger autocomplete",
+        "   Ctrl+Shift+S   Query statistics",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
@@ -1508,6 +1710,8 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Enter          Select item",
         "   ↑/↓            Navigate",
         "   Ctrl+I         Inspect table (DDL)",
+        "   /              Search/filter",
+        "   Esc            Clear filter",
         "",
         " RESULTS",
         "   Tab/Shift+Tab  Next/Prev column",
