@@ -77,6 +77,12 @@ impl ExportFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransactionState {
+    None,
+    Active,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SidebarTab {
     Databases,
     Tables,
@@ -156,6 +162,11 @@ pub struct App {
 
     // Async connection task
     pub pending_connection: Option<(ConnectionConfig, JoinHandle<Result<Client>>)>,
+
+    // Transaction management
+    pub transaction_state: TransactionState,
+    pub transaction_start: Option<Instant>,
+    pub transaction_query_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,6 +430,9 @@ impl App {
             table_inspector: None,
             export_selected: 0,
             pending_connection: None,
+            transaction_state: TransactionState::None,
+            transaction_start: None,
+            transaction_query_count: 0,
         }
     }
 
@@ -884,6 +898,16 @@ impl App {
                 self.autocomplete.active = false;
                 self.execute_query().await?;
                 self.focus = Focus::Results;
+            }
+            // Transaction management
+            KeyCode::Char('t') if ctrl => {
+                self.begin_transaction().await?;
+            }
+            KeyCode::Char('k') if ctrl => {
+                self.commit_transaction().await?;
+            }
+            KeyCode::Char('r') if ctrl && shift => {
+                self.rollback_transaction().await?;
             }
             KeyCode::Enter => {
                 self.editor.insert_newline();
@@ -1631,6 +1655,22 @@ impl App {
             return Ok(());
         }
 
+        // Detect transaction commands typed manually
+        let query_upper = query.trim().to_uppercase();
+        if query_upper == "BEGIN" || query_upper == "START TRANSACTION" {
+            self.transaction_state = TransactionState::Active;
+            self.transaction_start = Some(Instant::now());
+            self.transaction_query_count = 0;
+        } else if query_upper == "COMMIT" || query_upper == "END" {
+            self.transaction_state = TransactionState::None;
+            self.transaction_start = None;
+            self.transaction_query_count = 0;
+        } else if query_upper == "ROLLBACK" || query_upper == "ABORT" {
+            self.transaction_state = TransactionState::None;
+            self.transaction_start = None;
+            self.transaction_query_count = 0;
+        }
+
         if self.connection.client.is_some() {
             self.start_loading("Executing query...".to_string());
 
@@ -1686,6 +1726,11 @@ impl App {
                 None
             };
 
+            // Track transaction query count
+            if self.transaction_state == TransactionState::Active {
+                self.transaction_query_count += 1;
+            }
+
             self.results.push(result);
             self.explain_plans.push(plan);
             self.current_result = self.results.len() - 1;
@@ -1701,6 +1746,88 @@ impl App {
             self.set_status("Not connected to database".to_string(), StatusType::Error);
         }
 
+        Ok(())
+    }
+
+    async fn begin_transaction(&mut self) -> Result<()> {
+        if self.connection.client.is_none() {
+            self.set_status("Not connected to database".to_string(), StatusType::Error);
+            return Ok(());
+        }
+        if self.transaction_state == TransactionState::Active {
+            self.set_status("Transaction already active".to_string(), StatusType::Warning);
+            return Ok(());
+        }
+        let client = self.connection.client.as_ref().unwrap();
+        let result = execute_query(client, "BEGIN").await?;
+        if result.error.is_some() {
+            self.set_status("BEGIN failed".to_string(), StatusType::Error);
+        } else {
+            self.transaction_state = TransactionState::Active;
+            self.transaction_start = Some(Instant::now());
+            self.transaction_query_count = 0;
+            self.set_status("Transaction started".to_string(), StatusType::Info);
+        }
+        Ok(())
+    }
+
+    async fn commit_transaction(&mut self) -> Result<()> {
+        if self.connection.client.is_none() {
+            self.set_status("Not connected to database".to_string(), StatusType::Error);
+            return Ok(());
+        }
+        if self.transaction_state != TransactionState::Active {
+            self.set_status("No active transaction".to_string(), StatusType::Warning);
+            return Ok(());
+        }
+        let client = self.connection.client.as_ref().unwrap();
+        let result = execute_query(client, "COMMIT").await?;
+        if result.error.is_some() {
+            self.set_status("COMMIT failed".to_string(), StatusType::Error);
+        } else {
+            let duration = self
+                .transaction_start
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let msg = format!(
+                "Transaction committed ({} queries, {}s)",
+                self.transaction_query_count, duration
+            );
+            self.transaction_state = TransactionState::None;
+            self.transaction_start = None;
+            self.transaction_query_count = 0;
+            self.set_status(msg, StatusType::Success);
+        }
+        Ok(())
+    }
+
+    async fn rollback_transaction(&mut self) -> Result<()> {
+        if self.connection.client.is_none() {
+            self.set_status("Not connected to database".to_string(), StatusType::Error);
+            return Ok(());
+        }
+        if self.transaction_state != TransactionState::Active {
+            self.set_status("No active transaction".to_string(), StatusType::Warning);
+            return Ok(());
+        }
+        let client = self.connection.client.as_ref().unwrap();
+        let result = execute_query(client, "ROLLBACK").await?;
+        if result.error.is_some() {
+            self.set_status("ROLLBACK failed".to_string(), StatusType::Error);
+        } else {
+            let duration = self
+                .transaction_start
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let msg = format!(
+                "Transaction rolled back ({} queries, {}s)",
+                self.transaction_query_count, duration
+            );
+            self.transaction_state = TransactionState::None;
+            self.transaction_start = None;
+            self.transaction_query_count = 0;
+            self.set_status(msg, StatusType::Warning);
+        }
         Ok(())
     }
 
