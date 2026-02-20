@@ -41,6 +41,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Draw status bar
     draw_status_bar(frame, app, chunks[2]);
 
+    // Draw autocomplete popup (positioned relative to editor cursor)
+    if app.autocomplete.active && app.focus == Focus::Editor {
+        // Compute the editor inner area to position the popup
+        let editor_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Min(0)])
+            .split(main_chunks[1]);
+        let editor_inner = Block::default()
+            .borders(Borders::ALL)
+            .inner(editor_chunks[0]);
+        draw_autocomplete(frame, app, editor_inner);
+    }
+
     // Draw toasts
     if !app.show_help {
         draw_toasts(frame, app);
@@ -1487,6 +1500,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Z         Undo",
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
+        "   Ctrl+Space     Trigger autocomplete",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
@@ -1527,4 +1541,67 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         .style(Style::default().bg(theme.bg_primary));
 
     frame.render_widget(help, help_area);
+}
+
+fn draw_autocomplete(frame: &mut Frame, app: &App, editor_area: Rect) {
+    let theme = &app.theme;
+    let ac = &app.autocomplete;
+
+    if ac.suggestions.is_empty() {
+        return;
+    }
+
+    // Position popup below the cursor
+    let cursor_x = editor_area.x + app.editor.cursor_x as u16;
+    let cursor_y = editor_area.y + (app.editor.cursor_y - app.editor.scroll_offset) as u16 + 1;
+
+    let max_items = ac.suggestions.len().min(8);
+    let popup_width = 35.min(editor_area.width.saturating_sub(2));
+    let popup_height = (max_items as u16 + 2).min(editor_area.height.saturating_sub(2));
+
+    // Adjust position if popup would go off screen
+    let popup_x = cursor_x.min(frame.area().width.saturating_sub(popup_width));
+    let popup_y = if cursor_y + popup_height > frame.area().height {
+        // Show above cursor if no room below
+        cursor_y.saturating_sub(popup_height + 1)
+    } else {
+        cursor_y
+    };
+
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let items: Vec<ListItem> = ac
+        .suggestions
+        .iter()
+        .enumerate()
+        .take(max_items)
+        .map(|(i, suggestion)| {
+            let is_selected = i == ac.selected;
+            let kind_label = suggestion.kind.label();
+
+            let text = format!(" {} {:>2} ", suggestion.text, kind_label);
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.text_accent)
+                    .bg(theme.bg_highlight)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_primary)
+            };
+
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
 }
