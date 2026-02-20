@@ -61,10 +61,7 @@ impl App {
         }
     }
 
-    pub(super) async fn handle_connection_dialog_input(
-        &mut self,
-        key: KeyEvent,
-    ) -> Result<()> {
+    pub(super) async fn handle_connection_dialog_input(&mut self, key: KeyEvent) -> Result<()> {
         // Ignore input while connection is in progress (except Esc to cancel)
         if self.pending_connection.is_some() && key.code != KeyCode::Esc {
             return Ok(());

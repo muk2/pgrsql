@@ -135,10 +135,7 @@ impl App {
         }
     }
 
-    pub(super) async fn handle_table_inspector_input(
-        &mut self,
-        key: KeyEvent,
-    ) -> Result<()> {
+    pub(super) async fn handle_table_inspector_input(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.table_inspector = None;
