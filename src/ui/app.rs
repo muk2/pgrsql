@@ -1661,11 +1661,11 @@ impl App {
             self.transaction_state = TransactionState::Active;
             self.transaction_start = Some(Instant::now());
             self.transaction_query_count = 0;
-        } else if query_upper == "COMMIT" || query_upper == "END" {
-            self.transaction_state = TransactionState::None;
-            self.transaction_start = None;
-            self.transaction_query_count = 0;
-        } else if query_upper == "ROLLBACK" || query_upper == "ABORT" {
+        } else if query_upper == "COMMIT"
+            || query_upper == "END"
+            || query_upper == "ROLLBACK"
+            || query_upper == "ABORT"
+        {
             self.transaction_state = TransactionState::None;
             self.transaction_start = None;
             self.transaction_query_count = 0;
@@ -1755,7 +1755,10 @@ impl App {
             return Ok(());
         }
         if self.transaction_state == TransactionState::Active {
-            self.set_status("Transaction already active".to_string(), StatusType::Warning);
+            self.set_status(
+                "Transaction already active".to_string(),
+                StatusType::Warning,
+            );
             return Ok(());
         }
         let client = self.connection.client.as_ref().unwrap();
