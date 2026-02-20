@@ -1,6 +1,7 @@
 pub mod ast;
 mod db;
 mod editor;
+mod explain;
 mod export;
 mod ui;
 
