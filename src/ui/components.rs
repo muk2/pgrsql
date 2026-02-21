@@ -74,6 +74,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_export_picker(frame, app);
     }
 
+    // Draw stats panel if active
+    if app.focus == Focus::StatsPanel {
+        draw_stats_panel(frame, app);
+    }
+
     // Draw help overlay if active
     if app.show_help {
         draw_help_overlay(frame, app);
@@ -1110,8 +1115,16 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme.text_muted).bg(theme.bg_secondary)
     };
 
-    // Right section: help hints
-    let right_text = "? Help | Ctrl+Q/D Quit ";
+    // Right section: stats + help hints
+    let right_text = if app.query_stats.session_queries > 0 {
+        format!(
+            "Queries: {} (avg {:.0}ms) | ? Help | Ctrl+Q/D Quit ",
+            app.query_stats.session_queries,
+            app.query_stats.session_avg_time_ms()
+        )
+    } else {
+        "? Help | Ctrl+Q/D Quit ".to_string()
+    };
 
     // Calculate padding
     let left_len = left_text.len() as u16;
@@ -1592,6 +1605,113 @@ fn draw_export_picker(frame: &mut Frame, app: &App) {
     frame.render_widget(hint, hint_area);
 }
 
+fn draw_stats_panel(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let panel_width = 50.min(area.width.saturating_sub(4));
+    let panel_height = 20.min(area.height.saturating_sub(4));
+
+    let panel_x = (area.width - panel_width) / 2;
+    let panel_y = (area.height - panel_height) / 2;
+
+    let panel_area = Rect::new(panel_x, panel_y, panel_width, panel_height);
+
+    frame.render_widget(Clear, panel_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border_focused))
+        .title(" Query Statistics ")
+        .title_style(
+            Style::default()
+                .fg(theme.text_accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().bg(theme.bg_primary));
+
+    let inner = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let stats = &app.query_stats;
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        " SESSION STATISTICS",
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("   Queries executed:  {}", stats.session_queries),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "   Avg time:          {:.2} ms",
+            stats.session_avg_time_ms()
+        ),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ALL-TIME STATISTICS",
+        Style::default()
+            .fg(theme.text_accent)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("   Total queries:     {}", stats.total_queries),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   Successful:        {}", stats.successful_queries),
+        Style::default().fg(theme.success),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   Failed:            {}", stats.failed_queries),
+        Style::default().fg(theme.error),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   Success rate:      {:.1}%", stats.success_rate()),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("   Avg time:          {:.2} ms", stats.avg_time_ms()),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   Min time:          {:.2} ms", stats.min_time_ms),
+        Style::default().fg(theme.success),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("   Max time:          {:.2} ms", stats.max_time_ms),
+        Style::default().fg(theme.warning),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("   Total time:        {:.2} ms", stats.total_time_ms),
+        Style::default().fg(theme.text_primary),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Esc/q: Close  |  Up/Down: Scroll",
+        Style::default().fg(theme.text_muted),
+    )));
+
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(app.stats_scroll)
+        .take(inner.height as usize)
+        .collect();
+
+    let paragraph = Paragraph::new(visible);
+    frame.render_widget(paragraph, inner);
+}
+
 fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
@@ -1646,6 +1766,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+C         Copy cell value",
         "   Ctrl+E         Toggle EXPLAIN plan view",
         "   Ctrl+S         Export results",
+        "   Ctrl+Shift+S   Query statistics",
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
         "",
