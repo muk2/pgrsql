@@ -7,7 +7,7 @@ use tokio_postgres::Client;
 use crate::db::{
     create_client, execute_query, get_columns, get_databases, get_indexes, get_schemas,
     get_table_ddl, get_tables, ColumnDetails, ConnectionConfig, ConnectionManager, DatabaseInfo,
-    IndexInfo, QueryResult, SchemaInfo, SslMode, TableInfo,
+    ErrorCategory, IndexInfo, QueryResult, SchemaInfo, SslMode, StructuredError, TableInfo,
 };
 use crate::editor::{HistoryEntry, QueryHistory, TextBuffer};
 use crate::explain::{is_explain_query, parse_explain_output, QueryPlan};
@@ -1625,9 +1625,115 @@ impl App {
         boundaries
     }
 
+    /// Pre-validate SQL syntax using sqlparser before sending to PostgreSQL.
+    /// Returns Some(StructuredError) if validation fails, None if it passes or
+    /// should be skipped (for PostgreSQL-specific commands sqlparser doesn't support).
+    fn prevalidate_sql(query: &str) -> Option<StructuredError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Skip pre-validation for PostgreSQL-specific commands that sqlparser
+        // may not support — let PostgreSQL handle these directly.
+        let first_word = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_uppercase();
+        let skip_keywords = [
+            "SHOW",
+            "SET",
+            "RESET",
+            "COPY",
+            "LISTEN",
+            "NOTIFY",
+            "UNLISTEN",
+            "VACUUM",
+            "REINDEX",
+            "CLUSTER",
+            "DISCARD",
+            "LOAD",
+            "SECURITY",
+            "DO",
+            "CALL",
+            "CHECKPOINT",
+            "DEALLOCATE",
+            "PREPARE",
+            "EXECUTE",
+            "REASSIGN",
+        ];
+        if skip_keywords.contains(&first_word.as_str()) {
+            return None;
+        }
+        // Also skip backslash meta-commands
+        if trimmed.starts_with('\\') {
+            return None;
+        }
+
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let dialect = PostgreSqlDialect {};
+        match Parser::parse_sql(&dialect, trimmed) {
+            Ok(_) => None, // Parsing succeeded, send to PostgreSQL
+            Err(parse_err) => {
+                let err_msg = parse_err.to_string();
+
+                // Extract line/column from the sqlparser error message if possible.
+                // sqlparser errors look like: "Expected ..., found: ... at Line: X, Column: Y"
+                let (line, col) = parse_line_col_from_sqlparser_error(&err_msg);
+
+                Some(StructuredError {
+                    category: ErrorCategory::Syntax,
+                    severity: "ERROR".to_string(),
+                    code: String::new(),
+                    message: err_msg,
+                    detail: None,
+                    hint: Some(
+                        "Pre-validated locally. If this is valid PostgreSQL syntax, \
+                         the parser may not support it."
+                            .to_string(),
+                    ),
+                    position: None,
+                    schema: None,
+                    table: None,
+                    column: None,
+                    constraint: None,
+                    where_: None,
+                    line,
+                    col,
+                })
+            }
+        }
+    }
+
     async fn execute_query(&mut self) -> Result<()> {
         let query = self.get_query_at_cursor();
         if query.trim().is_empty() {
+            return Ok(());
+        }
+
+        // Client-side SQL pre-validation: catch obvious syntax errors before
+        // sending the query to PostgreSQL for faster feedback.
+        if let Some(pre_error) = Self::prevalidate_sql(&query) {
+            let result = QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                row_count: 0,
+                execution_time: Duration::from_millis(0),
+                affected_rows: None,
+                error: Some(pre_error.clone()),
+            };
+            self.set_status(
+                format!("{}: {}", pre_error.category, pre_error.message),
+                StatusType::Error,
+            );
+            self.results.push(result);
+            self.explain_plans.push(None);
+            self.current_result = self.results.len() - 1;
+            self.result_selected_row = 0;
+            self.result_selected_col = 0;
             return Ok(());
         }
 
@@ -1880,6 +1986,33 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+/// Extract line and column numbers from a sqlparser error message.
+/// sqlparser errors often include "at Line: X, Column: Y" at the end.
+fn parse_line_col_from_sqlparser_error(err_msg: &str) -> (Option<usize>, Option<usize>) {
+    // Pattern: "... at Line: X, Column: Y"
+    if let Some(line_idx) = err_msg.find("Line: ") {
+        let after_line = &err_msg[line_idx + 6..];
+        let line_num: Option<usize> = after_line
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|s| s.parse().ok());
+
+        let col_num = if let Some(col_idx) = err_msg.find("Column: ") {
+            let after_col = &err_msg[col_idx + 8..];
+            after_col
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|s| s.parse().ok())
+        } else {
+            None
+        };
+
+        (line_num, col_num)
+    } else {
+        (None, None)
     }
 }
 
