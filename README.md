@@ -228,6 +228,59 @@ Query history is stored in:
 - **Linux/macOS**: `~/.local/share/pgrsql/history.json`
 - **Windows**: `%LOCALAPPDATA%\pgrsql\history.json`
 
+## Writing and Running Queries
+
+### Query Execution
+
+pgrsql uses **standard PostgreSQL SQL syntax** -- any valid PostgreSQL query will work. Type your SQL into the editor pane and press **F5** or **Ctrl+Enter** to execute.
+
+- **Single query**: Just type and execute. The trailing semicolon is optional for single queries.
+- **Multiple queries**: Separate queries with `;` (semicolons). pgrsql will execute the query **at the cursor position**, not all queries at once. The active query is highlighted with a vertical bar (`│`) in the left gutter.
+- **Query results**: Appear in the bottom Results pane, showing column names, data, row count, and execution time.
+- **Errors**: If a query fails, the error is displayed in the Results pane with the error category, SQLSTATE code, message, and hints when available.
+
+### SQL Syntax Notes
+
+pgrsql does **not** modify or reformat your SQL before sending it to PostgreSQL. You can write queries exactly as you would in `psql` or any other PostgreSQL client:
+
+```sql
+-- All of these work as expected:
+SELECT * FROM users LIMIT 10;
+SELECT * FROM public.games LIMIT 100;
+select id, name from users where active = true order by name;
+```
+
+There are no special spacing or formatting requirements. Standard PostgreSQL syntax including `JOIN`, `WITH` (CTEs), `UNION`, subqueries, window functions, and JSON operators all work normally.
+
+### Multi-Statement Editing
+
+When you have multiple queries in the editor:
+
+```sql
+SELECT COUNT(*) FROM users;
+SELECT * FROM orders WHERE total > 100;
+SELECT NOW();
+```
+
+Place your cursor on the query you want to execute and press **F5**. The active query block is visually indicated with a `│` marker in the gutter. pgrsql splits on semicolons while respecting string literals (`'...'`), double-quoted identifiers (`"..."`), and comments (`--` and `/* */`).
+
+## Exporting Results
+
+After executing a query with results, you can export the data:
+
+1. Navigate to the Results pane (press **F5** to execute, or **Tab** to switch)
+2. Press **Ctrl+S** to open the export format picker
+3. Choose a format:
+   - **CSV (.csv)** -- Comma-separated values with header row
+   - **JSON (.json)** -- Array of objects, pretty-printed
+   - **SQL INSERT (.sql)** -- INSERT statements for each row
+   - **TSV (.tsv)** -- Tab-separated values with header row
+   - **Copy to clipboard (CSV)** -- Copies CSV directly to your clipboard
+
+Files are saved to the current working directory as `pgrsql_export_YYYYMMDD_HHMMSS.<ext>`.
+
+**Quick export**: Press `1`-`5` in the export picker to select a format directly without navigating.
+
 ## Examples
 
 ### Basic SELECT
