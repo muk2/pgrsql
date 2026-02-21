@@ -1,12 +1,3 @@
-pub mod ast;
-mod db;
-mod editor;
-mod explain;
-mod export;
-mod ui;
-
-use crate::db::ConnectionManager;
-use crate::ui::App;
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -16,6 +7,8 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use pgrsql::db::ConnectionManager;
+use pgrsql::ui::App;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
@@ -108,7 +101,7 @@ async fn run_app(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal.draw(|f| pgrsql::ui::draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {

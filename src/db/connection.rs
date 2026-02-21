@@ -120,6 +120,12 @@ pub struct ConnectionManager {
     pub current_schema: String,
 }
 
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 impl ConnectionManager {
     pub fn new() -> Self {
