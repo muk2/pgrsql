@@ -1,0 +1,8 @@
+name = "Verification"
+version = "0.1.0"
+keywords = ["formal-verification", "relational-algebra", "sql", "pgrsql"]
+description = "Formal verification of relational algebra transformations for pgrsql"
+defaultTargets = ["Verification"]
+
+[[lean_lib]]
+name = "Verification"
