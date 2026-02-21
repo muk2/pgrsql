@@ -46,7 +46,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         // Compute the editor inner area to position the popup
         let editor_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(40), Constraint::Min(0)])
+            .constraints([
+                Constraint::Percentage(app.editor_height_percent),
+                Constraint::Min(0),
+            ])
             .split(main_chunks[1]);
         let editor_inner = Block::default()
             .borders(Borders::ALL)
@@ -1596,16 +1599,6 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = frame.area();
 
-    let help_width = 50.min(area.width - 4);
-    let help_height = 25.min(area.height - 4);
-
-    let help_x = (area.width - help_width) / 2;
-    let help_y = (area.height - help_height) / 2;
-
-    let help_area = Rect::new(help_x, help_y, help_width, help_height);
-
-    frame.render_widget(Clear, help_area);
-
     let help_text = vec![
         "",
         " KEYBOARD SHORTCUTS",
@@ -1649,10 +1642,32 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+[/]       Prev/Next result set",
         "   PageUp/Down    Scroll results",
         "",
+        " ↑/↓/PgUp/PgDn to scroll | Esc/? to close",
     ];
+
+    let help_width = 50.min(area.width.saturating_sub(4));
+    // Use all available height if the terminal is small
+    let help_height = area
+        .height
+        .saturating_sub(4)
+        .min(help_text.len() as u16 + 2);
+
+    let help_x = (area.width.saturating_sub(help_width)) / 2;
+    let help_y = (area.height.saturating_sub(help_height)) / 2;
+
+    let help_area = Rect::new(help_x, help_y, help_width, help_height);
+
+    frame.render_widget(Clear, help_area);
+
+    // Apply scrolling so help is usable on small terminals
+    let inner_height = help_height.saturating_sub(2) as usize; // borders
+    let max_scroll = help_text.len().saturating_sub(inner_height);
+    let scroll = app.help_scroll.min(max_scroll);
 
     let text: Vec<Line> = help_text
         .iter()
+        .skip(scroll)
+        .take(inner_height)
         .map(|s| Line::from(Span::styled(*s, Style::default().fg(theme.text_primary))))
         .collect();
 

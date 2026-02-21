@@ -139,6 +139,7 @@ pub struct App {
 
     // Help
     pub show_help: bool,
+    pub help_scroll: usize,
 
     // Autocomplete
     pub autocomplete: AutocompleteState,
@@ -410,6 +411,7 @@ impl App {
             loading_message: String::new(),
             spinner_frame: 0,
             show_help: false,
+            help_scroll: 0,
             autocomplete: AutocompleteState::default(),
 
             explain_plans: Vec::new(),
@@ -1130,7 +1132,20 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
                 self.show_help = false;
+                self.help_scroll = 0;
                 self.focus = Focus::Editor;
+            }
+            KeyCode::Up => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                self.help_scroll += 1;
+            }
+            KeyCode::PageUp => {
+                self.help_scroll = self.help_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.help_scroll += 10;
             }
             _ => {}
         }
