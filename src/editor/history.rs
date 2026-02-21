@@ -62,6 +62,7 @@ impl QueryHistory {
         self.entries.get(idx)
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<&HistoryEntry> {
         if self.entries.is_empty() {
             return None;
