@@ -77,6 +77,44 @@ impl ExportFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FindReplaceField {
+    Search,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindReplaceState {
+    pub active: bool,
+    pub show_replace: bool,
+    pub search_text: String,
+    pub replace_text: String,
+    pub search_cursor: usize,
+    pub replace_cursor: usize,
+    pub focused_field: FindReplaceField,
+    /// Matches stored as (line, start_byte_col, end_byte_col)
+    pub matches: Vec<(usize, usize, usize)>,
+    pub current_match: usize,
+    pub case_sensitive: bool,
+}
+
+impl Default for FindReplaceState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            show_replace: false,
+            search_text: String::new(),
+            replace_text: String::new(),
+            search_cursor: 0,
+            replace_cursor: 0,
+            focused_field: FindReplaceField::Search,
+            matches: Vec::new(),
+            current_match: 0,
+            case_sensitive: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SidebarTab {
     Databases,
     Tables,
@@ -117,6 +155,9 @@ pub struct App {
     // Editor
     pub editor: TextBuffer,
     pub query_history: QueryHistory,
+
+    // Find & Replace
+    pub find_replace: FindReplaceState,
 
     // Layout
     pub editor_height_percent: u16,
@@ -395,6 +436,7 @@ impl App {
 
             editor: TextBuffer::new(),
             query_history,
+            find_replace: FindReplaceState::default(),
 
             editor_height_percent: 40,
 
@@ -494,6 +536,11 @@ impl App {
                 return Ok(());
             }
             _ => {}
+        }
+
+        // Handle find/replace input when active (intercept before editor)
+        if self.find_replace.active && self.focus == Focus::Editor {
+            return self.handle_find_replace_input(key).await;
         }
 
         match self.focus {
@@ -909,6 +956,14 @@ impl App {
             }
             KeyCode::Char('y') if ctrl => {
                 self.editor.redo();
+            }
+            KeyCode::Char('f') if ctrl => {
+                self.open_find(false);
+                return Ok(());
+            }
+            KeyCode::Char('h') if ctrl => {
+                self.open_find(true);
+                return Ok(());
             }
             KeyCode::Char('l') if ctrl => {
                 self.editor.clear();
@@ -1707,6 +1762,322 @@ impl App {
         Ok(())
     }
 
+    // --- Find & Replace ---
+
+    fn open_find(&mut self, show_replace: bool) {
+        let fr = &mut self.find_replace;
+        if fr.active {
+            // If already open, just toggle replace visibility or refocus
+            fr.show_replace = show_replace;
+            if show_replace {
+                fr.focused_field = FindReplaceField::Replace;
+            }
+            return;
+        }
+        // Pre-fill search with selected text if any
+        if let Some(selected) = self.editor.get_selected_text() {
+            if !selected.contains('\n') {
+                self.find_replace.search_text = selected;
+                self.find_replace.search_cursor = self.find_replace.search_text.len();
+            }
+        }
+        self.find_replace.active = true;
+        self.find_replace.show_replace = show_replace;
+        self.find_replace.focused_field = FindReplaceField::Search;
+        self.update_find_matches();
+    }
+
+    fn close_find(&mut self) {
+        self.find_replace.active = false;
+        self.find_replace.matches.clear();
+    }
+
+    fn update_find_matches(&mut self) {
+        self.find_replace.matches.clear();
+        let needle = &self.find_replace.search_text;
+        if needle.is_empty() {
+            return;
+        }
+
+        let case_sensitive = self.find_replace.case_sensitive;
+        let needle_lower = if case_sensitive {
+            needle.to_string()
+        } else {
+            needle.to_lowercase()
+        };
+
+        for (line_idx, line) in self.editor.lines.iter().enumerate() {
+            let haystack = if case_sensitive {
+                line.to_string()
+            } else {
+                line.to_lowercase()
+            };
+            let mut start = 0;
+            while let Some(pos) = haystack[start..].find(&needle_lower) {
+                let abs_pos = start + pos;
+                self.find_replace
+                    .matches
+                    .push((line_idx, abs_pos, abs_pos + needle.len()));
+                start = abs_pos + 1;
+            }
+        }
+
+        // Clamp current_match
+        if self.find_replace.matches.is_empty()
+            || self.find_replace.current_match >= self.find_replace.matches.len()
+        {
+            self.find_replace.current_match = 0;
+        }
+    }
+
+    fn find_next(&mut self) {
+        if self.find_replace.matches.is_empty() {
+            return;
+        }
+        self.find_replace.current_match =
+            (self.find_replace.current_match + 1) % self.find_replace.matches.len();
+        self.jump_to_current_match();
+    }
+
+    fn find_prev(&mut self) {
+        if self.find_replace.matches.is_empty() {
+            return;
+        }
+        if self.find_replace.current_match == 0 {
+            self.find_replace.current_match = self.find_replace.matches.len() - 1;
+        } else {
+            self.find_replace.current_match -= 1;
+        }
+        self.jump_to_current_match();
+    }
+
+    fn jump_to_current_match(&mut self) {
+        if let Some(&(line, col, _)) = self
+            .find_replace
+            .matches
+            .get(self.find_replace.current_match)
+        {
+            self.editor.cursor_y = line;
+            self.editor.cursor_x = col;
+            self.editor.clear_selection();
+        }
+    }
+
+    /// Find the match closest to (or at) the current cursor position
+    fn find_nearest_match_index(&self) -> usize {
+        let cy = self.editor.cursor_y;
+        let cx = self.editor.cursor_x;
+        for (i, &(line, col, _)) in self.find_replace.matches.iter().enumerate() {
+            if line > cy || (line == cy && col >= cx) {
+                return i;
+            }
+        }
+        0 // wrap around to first match
+    }
+
+    fn replace_current(&mut self) {
+        if self.find_replace.matches.is_empty() {
+            return;
+        }
+        let idx = self.find_replace.current_match;
+        if let Some(&(line, start, end)) = self.find_replace.matches.get(idx) {
+            let replacement = self.find_replace.replace_text.clone();
+            // Perform the replacement in the editor
+            self.editor.cursor_y = line;
+            self.editor.cursor_x = start;
+            self.editor.selection_start = Some((start, line));
+            self.editor.cursor_x = end;
+            self.editor.delete_selection();
+            self.editor.insert_text(&replacement);
+
+            // Refresh matches
+            self.update_find_matches();
+            // Keep current_match in range
+            if !self.find_replace.matches.is_empty() {
+                self.find_replace.current_match =
+                    idx.min(self.find_replace.matches.len().saturating_sub(1));
+                self.jump_to_current_match();
+            }
+        }
+    }
+
+    fn replace_all(&mut self) {
+        if self.find_replace.matches.is_empty() {
+            return;
+        }
+        let replacement = self.find_replace.replace_text.clone();
+        let count = self.find_replace.matches.len();
+
+        // Replace in reverse order to preserve positions
+        for &(line, start, end) in self.find_replace.matches.iter().rev() {
+            self.editor.lines[line].replace_range(start..end, &replacement);
+        }
+        self.editor.modified = true;
+
+        self.update_find_matches();
+        self.set_status(
+            format!("Replaced {} occurrences", count),
+            StatusType::Success,
+        );
+    }
+
+    async fn handle_find_replace_input(&mut self, key: KeyEvent) -> Result<()> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Esc => {
+                self.close_find();
+            }
+            KeyCode::Tab => {
+                // Toggle between search and replace fields
+                if self.find_replace.show_replace {
+                    self.find_replace.focused_field = match self.find_replace.focused_field {
+                        FindReplaceField::Search => FindReplaceField::Replace,
+                        FindReplaceField::Replace => FindReplaceField::Search,
+                    };
+                }
+            }
+            KeyCode::Enter if ctrl && shift => {
+                // Replace all
+                if self.find_replace.show_replace {
+                    self.replace_all();
+                }
+            }
+            KeyCode::Enter if shift => {
+                // Find previous
+                self.find_prev();
+            }
+            KeyCode::Enter => {
+                match self.find_replace.focused_field {
+                    FindReplaceField::Search => {
+                        // Find next
+                        self.find_next();
+                    }
+                    FindReplaceField::Replace => {
+                        // Replace current
+                        self.replace_current();
+                    }
+                }
+            }
+            KeyCode::Char('c') if ctrl => {
+                // Toggle case sensitivity
+                self.find_replace.case_sensitive = !self.find_replace.case_sensitive;
+                self.update_find_matches();
+                let label = if self.find_replace.case_sensitive {
+                    "Case sensitive"
+                } else {
+                    "Case insensitive"
+                };
+                self.set_status(format!("Search: {}", label), StatusType::Info);
+            }
+            KeyCode::Char(c) => {
+                match self.find_replace.focused_field {
+                    FindReplaceField::Search => {
+                        let cursor = self.find_replace.search_cursor;
+                        self.find_replace.search_text.insert(cursor, c);
+                        self.find_replace.search_cursor += 1;
+                        self.update_find_matches();
+                        // Jump to nearest match from cursor
+                        if !self.find_replace.matches.is_empty() {
+                            self.find_replace.current_match = self.find_nearest_match_index();
+                            self.jump_to_current_match();
+                        }
+                    }
+                    FindReplaceField::Replace => {
+                        let cursor = self.find_replace.replace_cursor;
+                        self.find_replace.replace_text.insert(cursor, c);
+                        self.find_replace.replace_cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Backspace => match self.find_replace.focused_field {
+                FindReplaceField::Search => {
+                    if self.find_replace.search_cursor > 0 {
+                        self.find_replace.search_cursor -= 1;
+                        self.find_replace
+                            .search_text
+                            .remove(self.find_replace.search_cursor);
+                        self.update_find_matches();
+                        if !self.find_replace.matches.is_empty() {
+                            self.find_replace.current_match = self.find_nearest_match_index();
+                            self.jump_to_current_match();
+                        }
+                    }
+                }
+                FindReplaceField::Replace => {
+                    if self.find_replace.replace_cursor > 0 {
+                        self.find_replace.replace_cursor -= 1;
+                        self.find_replace
+                            .replace_text
+                            .remove(self.find_replace.replace_cursor);
+                    }
+                }
+            },
+            KeyCode::Delete => match self.find_replace.focused_field {
+                FindReplaceField::Search => {
+                    if self.find_replace.search_cursor < self.find_replace.search_text.len() {
+                        self.find_replace
+                            .search_text
+                            .remove(self.find_replace.search_cursor);
+                        self.update_find_matches();
+                    }
+                }
+                FindReplaceField::Replace => {
+                    if self.find_replace.replace_cursor < self.find_replace.replace_text.len() {
+                        self.find_replace
+                            .replace_text
+                            .remove(self.find_replace.replace_cursor);
+                    }
+                }
+            },
+            KeyCode::Left => match self.find_replace.focused_field {
+                FindReplaceField::Search => {
+                    if self.find_replace.search_cursor > 0 {
+                        self.find_replace.search_cursor -= 1;
+                    }
+                }
+                FindReplaceField::Replace => {
+                    if self.find_replace.replace_cursor > 0 {
+                        self.find_replace.replace_cursor -= 1;
+                    }
+                }
+            },
+            KeyCode::Right => match self.find_replace.focused_field {
+                FindReplaceField::Search => {
+                    if self.find_replace.search_cursor < self.find_replace.search_text.len() {
+                        self.find_replace.search_cursor += 1;
+                    }
+                }
+                FindReplaceField::Replace => {
+                    if self.find_replace.replace_cursor < self.find_replace.replace_text.len() {
+                        self.find_replace.replace_cursor += 1;
+                    }
+                }
+            },
+            KeyCode::Home => match self.find_replace.focused_field {
+                FindReplaceField::Search => self.find_replace.search_cursor = 0,
+                FindReplaceField::Replace => self.find_replace.replace_cursor = 0,
+            },
+            KeyCode::End => match self.find_replace.focused_field {
+                FindReplaceField::Search => {
+                    self.find_replace.search_cursor = self.find_replace.search_text.len()
+                }
+                FindReplaceField::Replace => {
+                    self.find_replace.replace_cursor = self.find_replace.replace_text.len()
+                }
+            },
+            KeyCode::Up => {
+                self.find_prev();
+            }
+            KeyCode::Down => {
+                self.find_next();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn update_autocomplete(&mut self) {
         let line = self.editor.current_line().to_string();
         let cursor_x = self.editor.cursor_x;
@@ -1892,5 +2263,196 @@ fn dialog_field_len(config: &ConnectionConfig, field_index: usize) -> usize {
         4 => config.username.len(),
         5 => config.password.len(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with_text(text: &str) -> App {
+        let mut app = App::new();
+        app.editor.set_text(text);
+        app
+    }
+
+    // --- Find matches ---
+
+    #[test]
+    fn test_find_matches_basic() {
+        let mut app = app_with_text("SELECT id FROM users WHERE id > 1");
+        app.find_replace.search_text = "id".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 2);
+        assert_eq!(app.find_replace.matches[0], (0, 7, 9));
+        assert_eq!(app.find_replace.matches[1], (0, 27, 29));
+    }
+
+    #[test]
+    fn test_find_matches_case_insensitive() {
+        let mut app = app_with_text("SELECT Id FROM users WHERE ID > 1");
+        app.find_replace.search_text = "id".to_string();
+        app.find_replace.active = true;
+        app.find_replace.case_sensitive = false;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 2);
+    }
+
+    #[test]
+    fn test_find_matches_case_sensitive() {
+        let mut app = app_with_text("SELECT Id FROM users WHERE ID > 1");
+        app.find_replace.search_text = "id".to_string();
+        app.find_replace.active = true;
+        app.find_replace.case_sensitive = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 0);
+    }
+
+    #[test]
+    fn test_find_matches_multiline() {
+        let mut app = app_with_text("SELECT id\nFROM users\nWHERE id = 1");
+        app.find_replace.search_text = "id".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 2);
+        assert_eq!(app.find_replace.matches[0], (0, 7, 9)); // first line
+        assert_eq!(app.find_replace.matches[1], (2, 6, 8)); // third line
+    }
+
+    #[test]
+    fn test_find_matches_empty_search() {
+        let mut app = app_with_text("hello world");
+        app.find_replace.search_text = "".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert!(app.find_replace.matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_no_matches() {
+        let mut app = app_with_text("hello world");
+        app.find_replace.search_text = "xyz".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert!(app.find_replace.matches.is_empty());
+    }
+
+    // --- Find navigation ---
+
+    #[test]
+    fn test_find_next_wraps() {
+        let mut app = app_with_text("aa bb aa bb aa");
+        app.find_replace.search_text = "aa".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 3);
+        assert_eq!(app.find_replace.current_match, 0);
+
+        app.find_next();
+        assert_eq!(app.find_replace.current_match, 1);
+
+        app.find_next();
+        assert_eq!(app.find_replace.current_match, 2);
+
+        app.find_next(); // wraps
+        assert_eq!(app.find_replace.current_match, 0);
+    }
+
+    #[test]
+    fn test_find_prev_wraps() {
+        let mut app = app_with_text("aa bb aa");
+        app.find_replace.search_text = "aa".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.current_match, 0);
+
+        app.find_prev(); // wraps to last
+        assert_eq!(app.find_replace.current_match, 1);
+
+        app.find_prev();
+        assert_eq!(app.find_replace.current_match, 0);
+    }
+
+    // --- Replace ---
+
+    #[test]
+    fn test_replace_current() {
+        let mut app = app_with_text("hello world hello");
+        app.find_replace.search_text = "hello".to_string();
+        app.find_replace.replace_text = "hi".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 2);
+
+        app.replace_current();
+        assert_eq!(app.editor.text(), "hi world hello");
+        assert_eq!(app.find_replace.matches.len(), 1); // one match left
+    }
+
+    #[test]
+    fn test_replace_all() {
+        let mut app = app_with_text("foo bar foo baz foo");
+        app.find_replace.search_text = "foo".to_string();
+        app.find_replace.replace_text = "qux".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 3);
+
+        app.replace_all();
+        assert_eq!(app.editor.text(), "qux bar qux baz qux");
+        assert!(app.find_replace.matches.is_empty()); // search text "foo" no longer found
+    }
+
+    #[test]
+    fn test_replace_all_different_lengths() {
+        let mut app = app_with_text("a b a b a");
+        app.find_replace.search_text = "a".to_string();
+        app.find_replace.replace_text = "xyz".to_string();
+        app.find_replace.active = true;
+        app.update_find_matches();
+        assert_eq!(app.find_replace.matches.len(), 3);
+
+        app.replace_all();
+        assert_eq!(app.editor.text(), "xyz b xyz b xyz");
+    }
+
+    // --- Open / Close ---
+
+    #[test]
+    fn test_open_find() {
+        let mut app = App::new();
+        app.open_find(false);
+        assert!(app.find_replace.active);
+        assert!(!app.find_replace.show_replace);
+    }
+
+    #[test]
+    fn test_open_find_with_replace() {
+        let mut app = App::new();
+        app.open_find(true);
+        assert!(app.find_replace.active);
+        assert!(app.find_replace.show_replace);
+    }
+
+    #[test]
+    fn test_close_find() {
+        let mut app = App::new();
+        app.open_find(false);
+        app.find_replace.search_text = "test".to_string();
+        app.update_find_matches();
+        app.close_find();
+        assert!(!app.find_replace.active);
+        assert!(app.find_replace.matches.is_empty());
+    }
+
+    #[test]
+    fn test_open_find_prefills_selection() {
+        let mut app = app_with_text("hello world");
+        app.editor.cursor_x = 0;
+        app.editor.start_selection();
+        app.editor.cursor_x = 5;
+        app.open_find(false);
+        assert_eq!(app.find_replace.search_text, "hello");
     }
 }
