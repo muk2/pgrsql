@@ -1630,6 +1630,7 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Z         Undo",
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
+        "   Ctrl+Shift+F   Format SQL",
         "   Ctrl+Space     Trigger autocomplete",
         "   Tab            Insert spaces",
         "",
