@@ -113,6 +113,8 @@ pub struct App {
     pub sidebar_scroll: usize,
     pub expanded_schemas: Vec<String>,
     pub expanded_tables: Vec<String>,
+    pub sidebar_filter: String,
+    pub sidebar_filter_active: bool,
 
     // Editor
     pub editor: TextBuffer,
@@ -392,6 +394,8 @@ impl App {
             sidebar_scroll: 0,
             expanded_schemas: vec!["public".to_string()],
             expanded_tables: Vec::new(),
+            sidebar_filter: String::new(),
+            sidebar_filter_active: false,
 
             editor: TextBuffer::new(),
             query_history,
@@ -774,6 +778,35 @@ impl App {
     }
 
     async fn handle_sidebar_input(&mut self, key: KeyEvent) -> Result<()> {
+        // Handle filter input mode
+        if self.sidebar_filter_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.sidebar_filter_active = false;
+                    self.sidebar_filter.clear();
+                    self.sidebar_selected = 0;
+                }
+                KeyCode::Enter => {
+                    self.sidebar_filter_active = false;
+                }
+                KeyCode::Backspace => {
+                    if !self.sidebar_filter.is_empty() {
+                        self.sidebar_filter.pop();
+                        self.sidebar_selected = 0;
+                    }
+                    if self.sidebar_filter.is_empty() {
+                        self.sidebar_filter_active = false;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.sidebar_filter.push(c);
+                    self.sidebar_selected = 0;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Tab | KeyCode::Right => {
                 self.focus = Focus::Editor;
@@ -814,6 +847,19 @@ impl App {
             }
             KeyCode::Char('i') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.open_table_inspector().await;
+            }
+            KeyCode::Char('/') => {
+                self.sidebar_filter_active = true;
+                self.sidebar_filter.clear();
+                self.sidebar_selected = 0;
+            }
+            KeyCode::Esc => {
+                if !self.sidebar_filter.is_empty() {
+                    self.sidebar_filter.clear();
+                    self.sidebar_selected = 0;
+                } else {
+                    self.focus = Focus::Editor;
+                }
             }
             _ => {}
         }
@@ -1881,6 +1927,15 @@ impl App {
 
         Ok(())
     }
+
+    /// Check if a string matches the current sidebar filter (case-insensitive substring).
+    pub fn matches_sidebar_filter(&self, text: &str) -> bool {
+        if self.sidebar_filter.is_empty() {
+            return true;
+        }
+        text.to_lowercase()
+            .contains(&self.sidebar_filter.to_lowercase())
+    }
 }
 
 fn dialog_field_len(config: &ConnectionConfig, field_index: usize) -> usize {
@@ -1892,5 +1947,39 @@ fn dialog_field_len(config: &ConnectionConfig, field_index: usize) -> usize {
         4 => config.username.len(),
         5 => config.password.len(),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_matches_sidebar_filter_empty() {
+        let app = App::new();
+        assert!(app.matches_sidebar_filter("anything"));
+    }
+
+    #[test]
+    fn test_matches_sidebar_filter_substring() {
+        let mut app = App::new();
+        app.sidebar_filter = "user".to_string();
+        assert!(app.matches_sidebar_filter("users"));
+        assert!(app.matches_sidebar_filter("user_roles"));
+        assert!(app.matches_sidebar_filter("active_users"));
+        assert!(!app.matches_sidebar_filter("orders"));
+
+        app.sidebar_filter = "usr".to_string();
+        assert!(app.matches_sidebar_filter("pg_usr_table"));
+        assert!(!app.matches_sidebar_filter("users"));
+    }
+
+    #[test]
+    fn test_matches_sidebar_filter_case_insensitive() {
+        let mut app = App::new();
+        app.sidebar_filter = "User".to_string();
+        assert!(app.matches_sidebar_filter("users"));
+        assert!(app.matches_sidebar_filter("USERS"));
+        assert!(app.matches_sidebar_filter("User_Data"));
     }
 }
