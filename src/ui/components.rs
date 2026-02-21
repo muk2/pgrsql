@@ -636,10 +636,10 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             String::new()
         };
-        if result.error.is_some() {
+        if let Some(err) = &result.error {
             format!(
-                " Results ({}/{}) - ERROR ({:.2}ms) ",
-                result_index, result_total, time_ms
+                " Results ({}/{}) - {} ({:.2}ms) ",
+                result_index, result_total, err.category, time_ms
             )
         } else if let Some(affected) = result.affected_rows {
             format!(
@@ -688,10 +688,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect) {
         }
     } else if let Some(result) = app.results.get(app.current_result) {
         if let Some(error) = &result.error {
-            let error_text = Paragraph::new(error.as_str())
-                .style(theme.status_error())
-                .wrap(Wrap { trim: true });
-            frame.render_widget(error_text, inner);
+            draw_structured_error(frame, app, error, inner);
         } else if result.columns.is_empty() {
             if let Some(affected) = result.affected_rows {
                 let msg = format!("{} rows affected", affected);
@@ -789,6 +786,139 @@ fn draw_result_table(frame: &mut Frame, app: &App, result: &crate::db::QueryResu
         .highlight_style(theme.selected());
 
     frame.render_widget(table, area);
+}
+
+fn draw_structured_error(
+    frame: &mut Frame,
+    app: &App,
+    error: &crate::db::StructuredError,
+    area: Rect,
+) {
+    let theme = &app.theme;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Category + severity header
+    let category_color = match error.category {
+        crate::db::ErrorCategory::Syntax => theme.error,
+        crate::db::ErrorCategory::Semantic => theme.warning,
+        crate::db::ErrorCategory::Execution => theme.error,
+        crate::db::ErrorCategory::Transaction => theme.warning,
+        crate::db::ErrorCategory::Connection => theme.error,
+        crate::db::ErrorCategory::Unknown => theme.error,
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} ", error.category),
+            Style::default()
+                .fg(category_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        if !error.code.is_empty() {
+            Span::styled(
+                format!("[{}] ", error.code),
+                Style::default().fg(theme.text_muted),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+
+    // Main error message
+    lines.push(Line::from(Span::styled(
+        format!(" {}", error.message),
+        Style::default().fg(theme.text_primary),
+    )));
+
+    // Line/column info
+    if let (Some(line), Some(col)) = (error.line, error.col) {
+        lines.push(Line::from(Span::styled(
+            format!(" at line {}, column {}", line, col),
+            Style::default().fg(theme.text_accent),
+        )));
+    }
+
+    lines.push(Line::from(""));
+
+    // Detail
+    if let Some(detail) = &error.detail {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Detail: ",
+                Style::default()
+                    .fg(theme.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(detail.clone(), Style::default().fg(theme.text_primary)),
+        ]));
+    }
+
+    // Hint
+    if let Some(hint) = &error.hint {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Hint: ",
+                Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(hint.clone(), Style::default().fg(theme.text_primary)),
+        ]));
+    }
+
+    // Schema/table/column context
+    if error.table.is_some() || error.schema.is_some() || error.column.is_some() {
+        let mut parts = Vec::new();
+        if let Some(schema) = &error.schema {
+            parts.push(schema.clone());
+        }
+        if let Some(table) = &error.table {
+            parts.push(table.clone());
+        }
+        if let Some(column) = &error.column {
+            parts.push(column.clone());
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Object: ",
+                Style::default()
+                    .fg(theme.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(parts.join("."), Style::default().fg(theme.text_primary)),
+        ]));
+    }
+
+    // Constraint
+    if let Some(constraint) = &error.constraint {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Constraint: ",
+                Style::default()
+                    .fg(theme.text_secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(constraint.clone(), Style::default().fg(theme.text_primary)),
+        ]));
+    }
+
+    // Where/context (e.g., PL/pgSQL stack trace)
+    if let Some(where_) = &error.where_ {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Context:",
+            Style::default()
+                .fg(theme.text_secondary)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for ctx_line in where_.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("   {}", ctx_line),
+                Style::default().fg(theme.text_muted),
+            )));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_explain_plan(frame: &mut Frame, app: &App, plan: &QueryPlan, area: Rect) {
