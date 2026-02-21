@@ -493,6 +493,34 @@ impl App {
                 self.focus = Focus::Editor;
                 return Ok(());
             }
+            // Alt+1/2/3: Jump directly to Sidebar/Editor/Results
+            (KeyCode::Char('1'), m) if m.contains(KeyModifiers::ALT) => {
+                if !matches!(
+                    self.focus,
+                    Focus::ConnectionDialog | Focus::Help | Focus::ExportPicker
+                ) {
+                    self.focus = Focus::Sidebar;
+                    return Ok(());
+                }
+            }
+            (KeyCode::Char('2'), m) if m.contains(KeyModifiers::ALT) => {
+                if !matches!(
+                    self.focus,
+                    Focus::ConnectionDialog | Focus::Help | Focus::ExportPicker
+                ) {
+                    self.focus = Focus::Editor;
+                    return Ok(());
+                }
+            }
+            (KeyCode::Char('3'), m) if m.contains(KeyModifiers::ALT) => {
+                if !matches!(
+                    self.focus,
+                    Focus::ConnectionDialog | Focus::Help | Focus::ExportPicker
+                ) {
+                    self.focus = Focus::Results;
+                    return Ok(());
+                }
+            }
             _ => {}
         }
 
@@ -1813,6 +1841,27 @@ impl App {
 
     fn copy_selected_cell(&mut self) {
         if let Some(result) = self.results.get(self.current_result) {
+            // If the current result has an error, copy the error message
+            if let Some(error) = &result.error {
+                let mut text = format!("{}: {}", error.category, error.message);
+                if let Some(detail) = &error.detail {
+                    text.push_str(&format!("\nDetail: {}", detail));
+                }
+                if let Some(hint) = &error.hint {
+                    text.push_str(&format!("\nHint: {}", hint));
+                }
+                if let (Some(line), Some(col)) = (error.line, error.col) {
+                    text.push_str(&format!("\nAt line {}, column {}", line, col));
+                }
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(&text);
+                    self.set_status(
+                        "Error message copied to clipboard".to_string(),
+                        StatusType::Info,
+                    );
+                }
+                return;
+            }
             if let Some(row) = result.rows.get(self.result_selected_row) {
                 if let Some(cell) = row.get(self.result_selected_col) {
                     let text = cell.display();
