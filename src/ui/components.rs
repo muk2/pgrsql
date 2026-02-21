@@ -12,7 +12,7 @@ use crate::explain::{
 };
 use crate::ui::{
     is_sql_function, is_sql_keyword, is_sql_type, App, Focus, SidebarTab, StatusType, Theme,
-    EXPORT_FORMATS, SPINNER_FRAMES,
+    TransactionState, EXPORT_FORMATS, SPINNER_FRAMES,
 };
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -83,12 +83,26 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let theme = &app.theme;
 
+    let txn_indicator = if app.transaction_state == TransactionState::Active {
+        let duration = app
+            .transaction_start
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0);
+        format!(
+            " | [TXN ACTIVE {}s, {} queries]",
+            duration, app.transaction_query_count
+        )
+    } else {
+        String::new()
+    };
+
     let connection_info = if app.connection.is_connected() {
         format!(
-            " {} | {} | {} ",
+            " {} | {} | {}{}",
             app.connection.config.display_string(),
             app.connection.current_database,
-            app.connection.current_schema
+            app.connection.current_schema,
+            txn_indicator
         )
     } else {
         " Not Connected ".to_string()
@@ -100,7 +114,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         " ".repeat(area.width.saturating_sub(connection_info.len() as u16 + 10) as usize)
     );
 
-    let header = Paragraph::new(header_text).style(theme.header());
+    let header_style = if app.transaction_state == TransactionState::Active {
+        Style::default()
+            .fg(theme.bg_primary)
+            .bg(theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme.header()
+    };
+    let header = Paragraph::new(header_text).style(header_style);
 
     frame.render_widget(header, area);
 }
@@ -1631,6 +1653,9 @@ fn draw_help_overlay(frame: &mut Frame, app: &App) {
         "   Ctrl+Shift+Z/Y Redo",
         "   Ctrl+A         Select all",
         "   Ctrl+Space     Trigger autocomplete",
+        "   Ctrl+T         Begin transaction",
+        "   Ctrl+K         Commit transaction",
+        "   Ctrl+Shift+R   Rollback transaction",
         "   Tab            Insert spaces",
         "",
         " SIDEBAR",
